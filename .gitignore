@@ -1,0 +1,60 @@
+# ====================================================================
+# Virtual Environments
+# ====================================================================
+venv/
+.venv/
+env/
+ENV/
+
+
+# ====================================================================
+# Data and Logs (Keep the folder structure via .gitkeep, ignore contents)
+# ====================================================================
+# Instead of data/*, we explicitly ignore the specific subfolders 
+# that contain your massive files.
+data/raw/
+data/results/primary_ablation.csv
+data/results/secondary_ablation.csv
+
+# Ensure individual massive files anywhere else are blocked
+*.csv
+*.parquet
+
+# Target logs specifically
+logs/*
+!logs/.gitkeep
+
+# --- EXCEPTIONS: Force Git to look inside the summary folder ---
+!data/results/summary/
+!data/results/summary/*
+
+# ====================================================================
+# Archives (Completely omit 'archive' folders anywhere in the project)
+# ====================================================================
+**/archive/
+
+# ====================================================================
+# Jupyter Notebooks Artifacts
+# ====================================================================
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# ====================================================================
+# Python & OS Artifacts (Includes the ghost files from typos)
+# ====================================================================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+Thumbs.db
+0)
+pd.DataFrame
+
+# ====================================================================
+# IDEs and Local Configurations
+# ====================================================================
+.vscode/
+.idea/
+.env
+
