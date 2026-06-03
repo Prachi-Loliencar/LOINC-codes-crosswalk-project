@@ -441,49 +441,59 @@ def save_streamlit_summaries(
     out_dir: str = "data/results/summary",
 ) -> None:
     """
-    Generates all parquet summary files consumed by the Streamlit app's
-    new load section. Call this at the bottom of ablation.py after the
-    three ablation runs complete.
+    Generates all parquet summary files consumed by the Streamlit app.
+    Call this at the bottom of ablation.py after the three ablation runs
+    complete, passing the full row-level result DataFrames.
 
     Parameters
     ----------
-    df_primary : output of run_primary()   — row-per-ELR results
-    df_filter  : output of run_filter_ablation() — row-per-ELR results
+    df_primary : output of run_primary()          — row-per-ELR results
+    df_filter  : output of run_filter_ablation()  — row-per-ELR results
+                 Must contain column filter_applied (not filter_condition).
     out_dir    : destination folder (created if absent)
 
     Output files and their exact column sets
     -----------------------------------------
-    primary_by_config.parquet
-        corpus_strategy, model_desc, n_distractors,
-        mrr_grouped, top1, top3, top5, n
+    PRIMARY ABLATION
+      primary_by_config.parquet
+          corpus_strategy, model_desc, n_distractors,
+          mrr_grouped, top1, top3, top5, n, n_loinc_codes
 
-    primary_by_coverage.parquet
-        corpus_strategy, model_desc, n_distractors, coverage_pattern,
-        mrr_grouped, top1, top3, n
+      primary_by_coverage.parquet
+          corpus_strategy, model_desc, n_distractors, coverage_pattern,
+          mrr_grouped, top1, top3, n
 
-    primary_by_noise.parquet
-        corpus_strategy, model_desc, n_distractors, noise_level,
-        mrr_grouped, n
+      primary_by_coverage_noise.parquet          ← needed by Tab 3 heatmap
+          corpus_strategy, model_desc, n_distractors,
+          coverage_pattern, noise_level, mrr_grouped, n
 
-    filter_by_config.parquet
-        filter_applied, corpus_strategy, mrr_grouped, top1, top3, top5, n
+    FILTER ABLATION
+      filter_by_config.parquet
+          filter_applied, corpus_strategy, mrr_grouped, top1, top3, top5, n
 
-    filter_by_method.parquet
-        filter_applied, has_method, mrr_grouped, n
+      filter_by_method.parquet
+          filter_applied, has_method, mrr_grouped, n
 
-    filter_by_coverage.parquet
-        filter_applied, coverage_pattern, mrr_grouped, n
+      filter_by_coverage.parquet
+          filter_applied, coverage_pattern, mrr_grouped, n
 
-    filter_by_noise_level.parquet
-        filter_applied, noise_level, mrr_grouped, n
+      filter_by_noise_level.parquet
+          filter_applied, noise_level, mrr_grouped, n
 
-    filter_by_noise_omission.parquet
-        filter_applied, noise_omission, mrr_grouped, n
+      filter_by_noise_omission.parquet
+          filter_applied, noise_omission, mrr_grouped, n
 
-    filter_by_noise_compression.parquet
-        filter_applied, noise_compression, mrr_grouped, n
+      filter_by_noise_compression.parquet
+          filter_applied, noise_compression, mrr_grouped, n
+
+      filter_by_noise_compression.parquet
+          filter_applied, noise_compression, mrr_grouped, n
+
+      filter_by_loinc.parquet                    ← needed by Tab 7 scatter
+          filter_applied, true_loinc, mrr_grouped, n
     """
     import os
+    import pathlib
 
     os.makedirs(out_dir, exist_ok=True)
 
@@ -491,22 +501,10 @@ def save_streamlit_summaries(
     # PRIMARY ABLATION
     # ------------------------------------------------------------------
 
-    # Config-level: one row per (corpus_strategy, model_desc, n_distractors)
-    # Tab 1 uses true_loinc.nunique() and row-count — add them here.
     n_loinc = df_primary["true_loinc"].nunique()
-    n_elr = len(
-        df_primary[
-            (
-                df_primary["corpus_strategy"]
-                == df_primary.groupby(
-                    ["corpus_strategy", "model_desc", "n_distractors"]
-                )["mrr_grouped"]
-                .mean()
-                .idxmax()[0]
-            )
-        ]
-    )  # approximate; Tab 1 recomputes from this table
 
+    # Config-level: one row per (corpus_strategy, model_desc, n_distractors)
+    # n_loinc_codes attached as a constant column for Tab 1 overview metric.
     (
         df_primary.groupby(["corpus_strategy", "model_desc", "n_distractors"])
         .agg(
@@ -517,14 +515,11 @@ def save_streamlit_summaries(
             n=("mrr_grouped", "count"),
         )
         .reset_index()
-        # Attach corpus-level constants for Tab 1 overview metrics
-        .assign(
-            n_loinc_codes=n_loinc,
-        )
+        .assign(n_loinc_codes=n_loinc)
         .to_parquet(f"{out_dir}/primary_by_config.parquet", index=False)
     )
 
-    # Coverage-pattern-level
+    # Coverage-pattern-level: Tab 3 coverage bar chart and table
     (
         df_primary.groupby(
             ["corpus_strategy", "model_desc", "n_distractors", "coverage_pattern"]
@@ -539,20 +534,7 @@ def save_streamlit_summaries(
         .to_parquet(f"{out_dir}/primary_by_coverage.parquet", index=False)
     )
 
-    # Noise-level
-    (
-        df_primary.groupby(
-            ["corpus_strategy", "model_desc", "n_distractors", "noise_level"]
-        )
-        .agg(
-            mrr_grouped=("mrr_grouped", "mean"),
-            n=("mrr_grouped", "count"),
-        )
-        .reset_index()
-        .to_parquet(f"{out_dir}/primary_by_noise.parquet", index=False)
-    )
-
-    # Coverage-pattern-level
+    # Coverage × noise_level: Tab 3 heatmap
     (
         df_primary.groupby(
             [
@@ -565,8 +547,6 @@ def save_streamlit_summaries(
         )
         .agg(
             mrr_grouped=("mrr_grouped", "mean"),
-            top1=("top1", "mean"),
-            top3=("top3", "mean"),
             n=("mrr_grouped", "count"),
         )
         .reset_index()
@@ -577,8 +557,8 @@ def save_streamlit_summaries(
     # FILTER ABLATION
     # ------------------------------------------------------------------
 
-    # Config-level (one row per filter_applied condition)
-    # Keep corpus_strategy so load_filter() can add corpus_label
+    # Config-level: one row per filter_applied condition
+    # corpus_strategy kept so load_filter() can add corpus_label
     (
         df_filter.groupby(["filter_applied", "corpus_strategy"])
         .agg(
@@ -592,20 +572,7 @@ def save_streamlit_summaries(
         .to_parquet(f"{out_dir}/filter_by_config.parquet", index=False)
     )
 
-    (
-        df_filter.groupby(["filter_applied", "true_loinc"])
-        .agg(
-            mrr_grouped=("mrr_grouped", "mean"),
-            top1=("top1", "mean"),
-            top3=("top3", "mean"),
-            top5=("top5", "mean"),
-            n=("mrr_grouped", "count"),
-        )
-        .reset_index()
-        .to_parquet(f"{out_dir}/filter_by_loinc.parquet", index=False)
-    )
-
-    # filter × has_method
+    # filter × has_method: Tab 4 has_method bar chart
     (
         df_filter.groupby(["filter_applied", "has_method"])
         .agg(
@@ -616,7 +583,8 @@ def save_streamlit_summaries(
         .to_parquet(f"{out_dir}/filter_by_method.parquet", index=False)
     )
 
-    # filter × coverage_pattern
+    # filter × coverage_pattern: Tab 4 coverage chart, Tab 6 TF-IDF baseline,
+    # Tab 7 val-side per-pattern table
     (
         df_filter.groupby(["filter_applied", "coverage_pattern"])
         .agg(
@@ -627,8 +595,14 @@ def save_streamlit_summaries(
         .to_parquet(f"{out_dir}/filter_by_coverage.parquet", index=False)
     )
 
-    # filter × noise dimensions (one file per dimension — Tab 7 loads as dict)
-    for noise_col in ["noise_level", "noise_omission", "noise_compression"]:
+    # filter × noise dimensions: Tab 7 section C val-side noise breakdown
+    # and _build_tfidf_ref() noise dict
+    for noise_col in [
+        "noise_level",
+        "noise_omission",
+        "noise_compression",
+        "noise_corruption",
+    ]:
         (
             df_filter.groupby(["filter_applied", noise_col])
             .agg(
@@ -639,15 +613,26 @@ def save_streamlit_summaries(
             .to_parquet(f"{out_dir}/filter_by_{noise_col}.parquet", index=False)
         )
 
-    # Report sizes
-    import pathlib
+    # filter × true_loinc: Tab 7 section D per-LOINC scatter (val side)
+    (
+        df_filter.groupby(["filter_applied", "true_loinc"])
+        .agg(
+            mrr_grouped=("mrr_grouped", "mean"),
+            n=("mrr_grouped", "count"),
+        )
+        .reset_index()
+        .to_parquet(f"{out_dir}/filter_by_loinc.parquet", index=False)
+    )
 
+    # ------------------------------------------------------------------
+    # Report
+    # ------------------------------------------------------------------
     total_kb = (
         sum(p.stat().st_size for p in pathlib.Path(out_dir).glob("*.parquet")) / 1024
     )
     n_files = len(list(pathlib.Path(out_dir).glob("*.parquet")))
     print(f"Saved {n_files} summary parquet files to {out_dir}/")
-    print(f"Total size: {total_kb:.1f} KB")
+    print(f"Total size: {total_kb:.1f} KB  (vs hundreds of MB for raw CSVs)")
 
 
 # ---------------------------------------------------------------------------
@@ -674,3 +659,7 @@ if __name__ == "__main__":
     print(brand_recovery_fraction(df_filter).to_string())
 
     save_streamlit_summaries(df_primary, df_filter)
+
+# df_primary= pd.read_csv("data/results/primary_ablation.csv")
+# df_filter=pd.read_csv("data/results/filter_ablation.csv")
+# save_streamlit_summaries(df_primary, df_filter)

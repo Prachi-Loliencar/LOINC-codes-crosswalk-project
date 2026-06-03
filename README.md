@@ -252,8 +252,7 @@ set of 5,280 simulated ELR strings across 36 LOINC codes.
 | TF-IDF — brand filter (production-feasible) | 0.748 |
 | Best sentence transformer (S-PubMedBERT-MS-MARCO) | 0.617 |
  
-TF-IDF leads the best sentence transformer by **+13 percentage points** overall,
-widening to **+21 pp** on analyte-only strings (coverage pattern `A`) where
+TF-IDF leads the best sentence transformer by an **absolute MRR margin of +0.13** overall, widening to a delta of **+0.21** under high-noise conditions. on analyte-only strings (coverage pattern `A`) where
 dense encoders fail to distinguish method signal absent from the query. The
 oracle filter ceiling of 0.767 confirms that the remaining gap is not
 recoverable from metadata filtering alone — it reflects genuine retrieval

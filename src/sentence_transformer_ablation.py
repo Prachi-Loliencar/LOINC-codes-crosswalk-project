@@ -387,6 +387,11 @@ def save_streamlit_summaries(
 
     os.makedirs(out_dir, exist_ok=True)
 
+    # ------------------------------------------------------------------
+    # SENTENCE TRANSFORMER
+    # ------------------------------------------------------------------
+
+    # Config-level: one row per (model_type × strategy)
     (
         df_st.groupby(["model_type", "strategy"])
         .agg(
@@ -399,7 +404,7 @@ def save_streamlit_summaries(
         .to_parquet(f"{out_dir}/st_by_config.parquet", index=False)
     )
 
-    # ST × coverage_pattern
+    # ST × coverage_pattern: Tab 6 section C coverage head-to-head
     (
         df_st.groupby(["model_type", "strategy", "coverage_pattern"])
         .agg(
@@ -410,18 +415,24 @@ def save_streamlit_summaries(
         .to_parquet(f"{out_dir}/st_by_coverage.parquet", index=False)
     )
 
-    # ST × noise_level
-    (
-        df_st.groupby(["model_type", "strategy", "noise_level"])
-        .agg(
-            mrr_grouped=("mrr_grouped", "mean"),
-            n=("mrr_grouped", "count"),
+    # ST × noise_level: Tab 6 section D noise robustness
+    for noise_col in [
+        "noise_level",
+        "noise_omission",
+        "noise_compression",
+        "noise_corruption",
+    ]:
+        (
+            df_st.groupby(["model_type", "strategy", noise_col])
+            .agg(
+                mrr_grouped=("mrr_grouped", "mean"),
+                n=("mrr_grouped", "count"),
+            )
+            .reset_index()
+            .to_parquet(f"{out_dir}/st_by_noise_{noise_col}.parquet", index=False)
         )
-        .reset_index()
-        .to_parquet(f"{out_dir}/st_by_noise.parquet", index=False)
-    )
 
-    # ST × has_method
+    # ST × has_method: Tab 6 section E method token presence chart
     (
         df_st.groupby(["model_type", "strategy", "has_method"])
         .agg(
@@ -457,3 +468,6 @@ if __name__ == "__main__":
     )
     print(summarize_by_coverage(df_results).loc[0].iloc[1].sort_values(ascending=False))
     save_streamlit_summaries(df_results)
+
+# df_results=pd.read_csv("data/results/sentence_transformer_ablation_results.csv")
+# save_streamlit_summaries(df_results)
