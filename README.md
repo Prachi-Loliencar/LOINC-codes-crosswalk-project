@@ -399,9 +399,20 @@ The remaining analysis notebooks (`ablation_results_combined`, `corpus_simulatio
 
 ---
 
-## 📄 Acknowledgements
+## 📄 Acknowledgements & data licensing
 
-LOINC codes and terminology are provided by the Regenstrief Institute and used per
-the [LOINC license](https://loinc.org/license/). The CDC LIVD table is a
-public-domain CDC resource. This project is not affiliated with or endorsed by
-either organization.
+This material contains content from LOINC (http://loinc.org). LOINC is copyright
+© Regenstrief Institute, Inc. and the Logical Observation Identifiers Names and
+Codes (LOINC) Committee and is available at no cost under the license at
+http://loinc.org/license. LOINC® is a registered United States trademark of
+Regenstrief Institute, Inc.
+
+The LOINC content redistributed in this repository is limited to a subset of the
+COVID-19 surveillance terms, restricted to the fields the application requires,
+with every record retaining its LOINC code (`loinc_num`) and long common name
+(`long_common_name`) in accordance with Section 10 of the LOINC license. The full
+notice is also provided in [`LOINC_short_license.txt`](LOINC_short_license.txt).
+LOINC version used: <2.81>.
+
+The CDC LIVD device submission table is a public-domain CDC resource. This project
+is not affiliated with or endorsed by the Regenstrief Institute or the CDC.

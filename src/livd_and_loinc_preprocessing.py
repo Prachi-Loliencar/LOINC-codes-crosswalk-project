@@ -222,3 +222,8 @@ if __name__ == "__main__":
     build_distractor_loincs(LOINC_PATH, df_eval)
 
     print("\nPreprocessing complete. Outputs written to data/processed/.")
+
+# copyright double check
+# covid_loinc = pd.read_csv("data/processed/covid_surveillance_loinc.csv")
+# loinc = pd.read_csv("data/raw/Loinc.csv")
+# loinc.loc[loinc.LOINC_NUM.isin(covid_loinc.loinc_num.unique()),"EXTERNAL_COPYRIGHT_NOTICE"].unique()

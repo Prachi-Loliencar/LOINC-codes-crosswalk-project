@@ -3618,3 +3618,18 @@ st.markdown(
     "</p>",
     unsafe_allow_html=True,
 )
+# LOINC license attribution — required by Section 10 of the LOINC license for any
+# product/service that incorporates LOINC content and is accessed through a UI.
+st.markdown(
+    "<p style='color:#94a3b8; font-size:0.72rem; line-height:1.45;'>"
+    "This material contains content from LOINC (loinc.org). LOINC is copyright "
+    "&copy; Regenstrief Institute, Inc. and the Logical Observation Identifiers "
+    "Names and Codes (LOINC) Committee and is available at no cost under the "
+    "license at <a href='https://loinc.org/license' "
+    "style='color:#94a3b8; text-decoration:underline;'>loinc.org/license</a>. "
+    "LOINC&reg; is a registered United States trademark of Regenstrief Institute, "
+    "Inc. The CDC LIVD table is a public-domain CDC resource. This project is not "
+    "affiliated with or endorsed by either organization."
+    "</p>",
+    unsafe_allow_html=True,
+)
