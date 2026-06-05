@@ -10,8 +10,8 @@ ENV/
 # ====================================================================
 # Data and Logs (Keep the folder structure via .gitkeep, ignore contents)
 # ====================================================================
-# Instead of data/*, we explicitly ignore the specific subfolders 
-# that contain your massive files.
+# Instead of data/*, we explicitly ignore the specific subfolders
+# that contain the massive files.
 data/raw/
 data/results/primary_ablation.csv
 data/results/secondary_ablation.csv
@@ -20,13 +20,21 @@ data/results/secondary_ablation.csv
 *.csv
 *.parquet
 
-# Target logs specifically
-logs/*
-!logs/.gitkeep
+# --- EXCEPTIONS: runtime CSVs the Streamlit app must load ---
+# These are small (<3 MB) and required at app startup / in the live demo.
+# covid_surveillance_loinc.csv is a license-compliant LOINC subset (code +
+# long common name retained); see LOINC_short_license.txt.
+!data/processed/covid_surveillance_loinc.csv
+!data/processed/elr_simulated.csv
+!data/results/test_filter_ablation.csv
 
 # --- EXCEPTIONS: Force Git to look inside the summary folder ---
 !data/results/summary/
 !data/results/summary/*
+
+# Target logs specifically
+logs/*
+!logs/.gitkeep
 
 # ====================================================================
 # Archives (Completely omit 'archive' folders anywhere in the project)
@@ -40,7 +48,7 @@ logs/*
 */.ipynb_checkpoints/
 
 # ====================================================================
-# Python & OS Artifacts (Includes the ghost files from typos)
+# Python & OS Artifacts
 # ====================================================================
 __pycache__/
 *.pyc
@@ -48,8 +56,6 @@ __pycache__/
 *.pyd
 .DS_Store
 Thumbs.db
-0)
-pd.DataFrame
 
 # ====================================================================
 # IDEs and Local Configurations
@@ -57,4 +63,3 @@ pd.DataFrame
 .vscode/
 .idea/
 .env
-
