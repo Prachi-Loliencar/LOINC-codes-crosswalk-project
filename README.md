@@ -10,16 +10,14 @@ A clinical NLP retrieval system that maps noisy, free-text lab test names from
 electronic lab reports to standardized **LOINC** codes, framed as an information
 retrieval (entity resolution) problem.
 
-> **Try it in 10 seconds:** the [interactive Streamlit app](https://your-streamlit-app-url.streamlit.app)
+> **Try it in 10 seconds:** the [interactive Streamlit app](https://loinc-codes-crosswalk-pl.streamlit.app)
 > lets you type a messy lab string, watch the candidate LOINC codes ranked in
 > real time, and explore the ablations and error analysis. No setup required.
 
-<!-- HERO MEDIA: add before publishing.
-     Primary: a static annotated screenshot (always renders, loads instantly).
-     ![App screenshot](docs/app_screenshot.png)
-     Optional: a short (<6s, <5MB) GIF of type-string -> ranked-output below it.
-     ![App demo](docs/app_demo.gif)
--->
+
+<a href="streamlit_screenshot.jpg" target="_blank">
+  <img src="streamlit_screenshot.jpg" alt="App screenshot" width="400" title="Click to enlarge">
+</a>
 
 ---
 
