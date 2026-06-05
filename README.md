@@ -1,325 +1,325 @@
-# LOINC Crosswalk on Simulated ELR Data
+# LOINC Crosswalk: mapping messy lab test names to standard codes
 
-A clinical NLP retrieval system that maps noisy Electronic Lab Report (ELR)
-test name strings to standardized LOINC codes. The project simulates realistic
-ELR data from the CDC LIVD table, benchmarks TF-IDF and sentence-transformer
-retrieval architectures under controlled noise conditions, and quantifies the
-contribution of structured metadata to retrieval accuracy.
+[![Live demo](https://img.shields.io/badge/Live_demo-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://your-streamlit-app-url.streamlit.app)
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+![License](https://img.shields.io/badge/License-MIT-green)
 
-**[Live demo → Streamlit app](#)** *(link once deployed)*
+**[▶ Live demo](https://your-streamlit-app-url.streamlit.app) · [Methodology](#how-it-works) · [Notebooks](notebooks/)**
 
----
+A clinical NLP retrieval system that maps noisy, free-text lab test names from
+electronic lab reports to standardized **LOINC** codes, framed as an information
+retrieval (entity resolution) problem.
 
-## Results at a glance
+> **Try it in 10 seconds:** the [interactive Streamlit app](https://your-streamlit-app-url.streamlit.app)
+> lets you type a messy lab string, watch the candidate LOINC codes ranked in
+> real time, and explore the ablations and error analysis. No setup required.
 
-The best TF-IDF configuration achieves **grouped MRR 0.747** on a held-out
-validation set of 5,280 simulated ELR strings across 36 LOINC codes,
-outperforming the best sentence transformer (S-PubMedBERT-MS-MARCO, MRR 0.617)
-by 13 percentage points. Full results, ablation details, and model selection
-rationale are in the [Results](#results) section.
-
----
-
-## Why this problem matters
-
-LOINC crosswalking is a persistent pain point in health data interoperability.
-ELR reporting, HIE onboarding, and lab data normalization all require mapping
-free-text or semi-structured test names to a controlled vocabulary. This project addresses it as an information retrieval problem,
-using the CDC LIVD device submission table as a principled source of real-world
-naming variation.
+<!-- HERO MEDIA: add before publishing.
+     Primary: a static annotated screenshot (always renders, loads instantly).
+     ![App screenshot](docs/app_screenshot.png)
+     Optional: a short (<6s, <5MB) GIF of type-string -> ranked-output below it.
+     ![App demo](docs/app_demo.gif)
+-->
 
 ---
 
-## Data sources
+## 📌 TL;DR
 
-**CDC LIVD Table.** Laboratory In Vitro Diagnostics device submissions for
-SARS-CoV-2, containing FDA-authorized test kit mappings to LOINC codes via
-vendor analyte names, specimen descriptions, and method information. The LIVD
-table determines scope: any LOINC code referenced in its submissions is
-included, encompassing single-analyte COVID codes and combination respiratory
-panels (flu A/B, RSV, SARS-CoV-2). 
+When a lab reports a result, the test name often arrives as a messy, inconsistent
+string (`SARS COVID-19 PCR Nasophar`). Downstream systems need it mapped to one
+standard code. I built and benchmarked a retrieval system that does this mapping
+automatically.
 
-**LOINC Table.** Full LOINC table joined to LIVD on LOINC code, providing
-component, system, method_typ, scale_typ, and long_common_name for corpus
-construction.
-
-Raw data files are not included in this repository. The LIVD table is available
-from the [CDC SARS-CoV-2 LIVD page](https://www.cdc.gov/csels/dls/livd-codes.html)
-and the LOINC table from [loinc.org](https://loinc.org/downloads/) (free
-registration required).
+- **Headline result:** the best model retrieves the correct code with a
+  **grouped MRR of 0.747**, matching each query against the full **98-code**
+  COVID-19 surveillance corpus, on a held-out set of **5,280** simulated lab
+  strings.
+- **The interesting finding:** a simple **TF-IDF** model beat every neural
+  sentence transformer I tested, by **0.13 in grouped MRR** overall. The data
+  explains why, and I show it below.
+- **Why it travels beyond healthcare:** this is a self-contained study in
+  matching the model to the structure of the data, rather than reaching for the
+  largest embedding model by default.
 
 ---
 
+## 🩺 Why this problem matters
 
-## Simulation design
- 
-**Deduplication.** The raw LIVD table contains approximately 998 device
-submission rows after merging with the LOINC table. Many LIVD rows list
-multiple valid specimen types for a single device (e.g. "Nasopharyngeal swab
-or Nasal swab"), stored as newline-separated entries in the Vendor Specimen
-Description field. These are exploded into one row per specimen type before
-deduplication, producing 1,829 rows across 36 LOINC codes. This explosion is
-necessary because specimen type is a simulation axis, each specimen type
-produces distinct ELR strings, and collapsing them would artificially limit
-naming variation.
- 
-The 1,829 rows are then deduplicated on a clinical key combining component,
-method_typ, system, and vendor analyte name. This removes manufacturer-driven
-redundancy (multiple devices submitting identical vendor analyte names for the
-same test) while preserving rows where different vendors use different
-names - the primary source of surface form variation in the simulation.
-Post-deduplication: 642 rows. After a minimum-seeds filter (≥3 LIVD rows per
-LOINC code to ensure sufficient perturbation diversity): 556 seeds across 36
-codes.
- 
-**Noise taxonomy.** Three noise dimensions are tracked independently per
-simulated string. Categories are defined on input transformations independently
-of any retrieval model or corpus and describe what happened to the string,
-not the retrieval consequence:
- 
-- *Corruption*: character-level damage (typos: swap, skip, extra character).
-  Token identity is partially or fully destroyed. Implemented via decaying
-  probability typo injection; space characters are excluded since space
-  insertion is not a realistic keystroke error in structured instrument fields.
-- *Compression*: a signal token is replaced with an alternate surface form of
-  the same semantic entity. The information is still present but encoded
-  differently, and is recoverable by a domain-aware model. Examples: `SARS-CoV-2` → `COVID-19` or `CORONAVIRUS` (same pathogen, different surface form); `RNA` → `NAA` or `PCR` (same detection chemistry); `nucleocapsid` → `N-GENE` (same gene target).
-- *Omission*: signal deleted entirely. Either a token is replaced with an
-  empty string, or an entire component (method, specimen) is structurally
-  absent from the template. Unrecoverable without external metadata or a
-  retrieval-side expansion dictionary.
-Interpretation tokens (`STATUS`, `RESULT`, `FINAL`) are appended at 10%
-probability to simulate LIS field verbosity but are not counted toward any
-noise dimension since they do not damage, substitute, or remove signal tokens,
-and their retrieval impact is negligible (confirmed by zero weight on
-`has_interp` in the coverage pattern scoring and near-zero IDF in the corpus).
- 
-**Template configuration.** ELR strings are assembled from up to four
-components, namely: model name, analyte, method, and specimen, under six weighted
-templates. Weights represent an assumed prior over ELR field completeness
-(no ground truth distribution was available). The dominant templates are
-analyte+method+specimen (30%) and analyte+method (30%), reflecting the
-frequency with which older LIS systems fail to populate the specimen
-segment.
- 
-**Coverage patterns.** Each simulated string is scored for which signal types
-are present: A (analyte), M (method), S (specimen), I (interpretation token).
-The most common patterns are `A+M` (41%), `A+M+S` (22%), and `A` alone (12%).
- 
----
- 
-## Retrieval architecture
- 
-```
-CDC LIVD Table ──► Preprocessing ──► Clean Seeds (551 rows, 36 LOINC codes)
-                                              │
-                                       ELR Simulation
-                                   (12 variants × noise injection)
-                                              │
-                                      6,600 ELR strings
-                                              │
-                           ┌──────────────────┴──────────────────┐
-                      TF-IDF retrieval              Sentence transformer
-                  (corpus strategy ablation)    (6 models × 2 corpus strategies)
-                           │
-                     Post-retrieval filters
-                     (oracle / brand imputation)
-                           │
-                   Specimen-aware grouped MRR evaluation
-```
- 
-**Stage 1 — Simulation.** LIVD vendor analyte names are preprocessed,
-deduplicated on a clinical key, and expanded to 12 stochastic variants per
-seed via the three-axis noise taxonomy described above.
- 
-**Stage 2 — Corpus construction.** The 98-code LOINC reference panel is
-enriched with domain expansion dictionaries (`LOINC_SYSTEM_EXPANSION`,
-`LOINC_METHOD_EXPANSION`, `LOINC_LCN_EXPANSION`) that map formal LOINC
-terminology to the surface forms observed in real ELR strings. Several corpus
-strategies are ablated; the best-performing strategy (`lcn_method_dict_combined`)
-concatenates the expanded long common name with system and method dictionary
-expansions.
- 
-**Stage 3 — Retrieval.** ELR queries are normalized (eg.`clean_text` +
-`normalize_elr` for TF-IDF) and matched against the corpus via cosine similarity over
-TF-IDF or sentence-transformer embeddings. Three vectorizer types are evaluated:
-word n-grams, character n-grams, and a mixed model that combines both via a
-weighted sum of their L2-normalized matrices. In the mixed model, α controls
-the relative contribution of the word component (α) versus the character
-component (1−α), where both sub-matrices are L2-normalized before scaling so
-α maps linearly to cosine-space contribution.
- 
-### Corpus strategies
- 
-The primary ablation compares five corpus construction strategies. The corpus
-is always the same 36 LOINC codes; only the text representation varies:
- 
-- **`lcn_only`**: Long common name (LCN) only (baseline). Example: `"SARS-CoV-2
-  (COVID-19) RNA [Presence] in Respiratory specimen by NAA with probe
-  detection"`.
-- **`combined`**:  Long common name (repeated 2x) + system expansion +
-  relatednames2 (synonym field). The LCN is repeated to counteract signal dilution from the
-  relatednames2 field, which is long and heterogeneous - its tokens inflate
-  raw term frequency counts and reduce the relative weight of discriminative
-  LCN tokens. String repetition raises TF counts for LCN tokens without
-  affecting IDF, providing a partial counterbalance.
-- **`lcn_method_dict_combined`** *(overall best)*: Long common name + system
-  expansion + system expansion + method dictionary expansion, without LCN repetition.. Replaces generic LOINC system and
-  method values with domain-specific surface forms. For example, `Nph` expands
-  to `"Nasopharynx Nasopharyngeal NP NPH"`, and `Probe.amp.tar` expands to
-  `"NAAT NAA PCR RT-PCR QPCR"`. This explicitly bridges the gap between formal
-  LOINC terminology and the vernacular names used in ELR strings. The fact that this strategy outperforms `combined`
-  without needing LCN repetition indicates that replacing relatednames2 with
-  a compact method expansion dictionary eliminates the dilution problem at its
-  source rather than compensating for it indirectly.
-- **`lcn_method_dict_filtered_rn`**: A combination of the last two; Long common name (repeated 2x) + system
-  expansion + method dictionary + filtered relatednames2. Filters relatednames2
-  to remove tokens appearing in >85% of codes (treated as uninformative
-  stopwords) before including it alongside the method dictionary. Retains some
-  relatednames2 signal while reducing dilution, but performs below
-  `lcn_method_dict_combined`, suggesting the residual relatednames2 content
-  adds noise even after filtering.
-- **`component_weighted_method_dict`**: Component field (repeated 2x via
-  string concatenation) + method dictionary expansion + system expansion.
-  Upweights the LOINC component axis on the assumption that it is more
-  discriminative than the full long common name. Performs well with distractors
-  but shows unstable generalization behavior as distractor count increases.
+LOINC crosswalking is a persistent challenge in health data interoperability.
+Electronic laboratory results often arrive with inconsistent naming conventions
+across vendors, instruments, and laboratory information systems. Accurate mapping
+is required for:
 
-  
-Additional strategies were explored during development
-but are not included in the primary ablation. These variants tested lower and higher LCN/component repetition counts (eg. 3x) and combinations thereof; all performed below
-their lower-repetition counterparts (with the exception of `component_weighted_method_dict` which performed worse with component x1), confirming that string repetition is an
-indirect and unreliable substitute for explicit vocabulary expansion. These
-strategies have been removed from `src/model_building_utils.py` to keep the
-codebase aligned with the repo.
+- Public health reporting
+- Health information exchange (HIE)
+- Clinical analytics
+- Longitudinal patient records
+- Multi-site research studies
 
-### Post-retrieval filters
- 
-Two optional post-retrieval reranking strategies are evaluated to quantify
-the value of structured metadata:
- 
-**Oracle filter (upper bound).** Uses ground-truth method class (NAAT vs antigen) and specimen
-type from the simulated ELR row to demote mismatching candidates with a 0.5x
-penalty, then re-ranks. This represents the maximum possible gain from
-metadata filtering if field extraction were perfect — an unrealistic but
-useful ceiling.
- 
-**Brand filter (production-feasible).** Scans the ELR string for known
-instrument brand tokens (e.g. `COBAS`, `VERITOR`, `XPERT`) and imputes method
-class via a hand-curated lookup table (e.g. `COBAS` → `probe.amp.tar`). Applies
-the same demotion logic as oracle filter. This is feasible in production
-because it requires only the ELR string itself.
- 
+This project investigates how retrieval-based approaches perform under realistic
+laboratory naming variation, and quantifies the value of domain-specific
+vocabulary engineering relative to modern embedding models.
+
+> **Three terms, up front:** *LOINC* is the universal code system for lab tests
+> (a barcode for "SARS-CoV-2 RNA by PCR"). An *ELR* is the electronic message a
+> lab sends to a public health agency. *LIVD* is a public CDC table linking real
+> FDA-authorized test kits to their LOINC codes, which is what makes realistic
+> simulation possible.
+
 ---
- 
-## Evaluation
- 
-**Primary metric.** Specimen-aware grouped MRR (`mrr_grouped`). For each ELR
-string, the valid answer set is expanded beyond the single true LOINC code to
-include LOINC codes sharing the same component and method with a
-specimen-compatible system value, and gene-target ambiguous codes where vendor
-analyte names provide insufficient token coverage to distinguish between codes.
-Reciprocal rank is computed against this expanded valid set. This correctly
-handles the LOINC design choice of using generic respiratory specimen codes
-for COVID-19 reporting rather than specimen-specific ones, for example, 45.5% of wrong
-top-1 predictions are specimen specificity mismatches (such as predicting Nose vs Respiratory System) absorbed by the grouped metric rather than genuine retrieval failures.
- 
-**Ablation structure.** Four nested stages:
- 
-1. *Primary* — corpus strategy × model type × distractor count
-2. *Secondary* — finer sweep over mixed word+char n-gram ranges and alpha weights
-3. *Filter ablation* — no-filter vs oracle vs brand-imputation post-retrieval
-   reranking on the best configuration
-4. *Sentence transformer* — 6 models × 2 corpus strategies, with a separate
-   preprocessing pipeline that preserves natural language structure rather than
-   applying TF-IDF tokenization
-**Splits.** Train/val/test is assigned by variant number rather than randomly
-within LOINC code, reflecting the deployment scenario where all LOINC codes
-are known at inference time and generalization is over novel surface forms from
-unseen lab senders.
- 
+
+## 🔁 The same problem in ML terms
+
+Although this project is rooted in healthcare interoperability, the underlying
+problem is familiar to many machine learning domains.
+
+| Healthcare concept | ML equivalent |
+|---|---|
+| LOINC mapping | Entity resolution |
+| ELR test name | Noisy query |
+| LOINC reference table | Candidate document corpus |
+| Crosswalk | Retrieval and ranking |
+| Vendor naming variation | Domain shift |
+| Abbreviations and aliases | Vocabulary mismatch |
+| Missing specimen or method fields | Feature omission |
+
+The objective is to retrieve the correct standardized laboratory concept from a
+fixed candidate set despite noisy, incomplete, and highly variable input strings.
+
+> **Scope:** the retrieval corpus is the full **98-code** CDC COVID-19 surveillance
+> panel. After deduplication and a minimum-seed filter, **36** of those codes
+> appear in the simulated ELR data, so every query is matched against all 98 while
+> evaluation runs on the 36 that occur in practice. The other 62 act as a
+> realistic in-corpus haystack.
+
 ---
- 
-## Results
- 
-All evaluation uses **specimen-aware grouped MRR** on a held-out validation
-set of 5,280 simulated ELR strings across 36 LOINC codes.
- 
+
+## 📊 Results
+
+All evaluation uses **specimen-aware grouped MRR** on a held-out validation set
+of **5,280** simulated ELR strings (the validation slice of 6,600 total; the rest
+are the test split). Queries are retrieved against the full 98-code surveillance
+corpus. MRR rewards ranking the right answer near the top; "grouped" credits
+clinically equivalent codes (see the collapsible under [How it works](#how-it-works)).
+
 | Configuration | Grouped MRR |
 |---|---|
-| TF-IDF — `lcn_method_dict_combined`, word unigram, 0 distractors | **0.747** |
-| TF-IDF — oracle filter upper bound (perfect metadata) | 0.767 |
-| TF-IDF — brand filter (production-feasible) | 0.748 |
+| **TF-IDF (`lcn_method_dict_combined`, word unigram, 0 distractors)** | **0.747** |
+| TF-IDF, brand filter (production-feasible) | 0.748 |
+| TF-IDF, oracle filter (perfect-metadata upper bound) | 0.767 |
 | Best sentence transformer (S-PubMedBERT-MS-MARCO) | 0.617 |
- 
-TF-IDF leads the best sentence transformer by an **absolute MRR margin of +0.13** overall, widening to a delta of **+0.21** under high-noise conditions. on analyte-only strings (coverage pattern `A`) where
-dense encoders fail to distinguish method signal absent from the query. The
-oracle filter ceiling of 0.767 confirms that the remaining gap is not
-recoverable from metadata filtering alone — it reflects genuine retrieval
-ambiguity in the corpus. The negligible gain from the brand filter (0.747 →
-0.748) reflects the corpus composition: 59 of 98 COVID LOINC codes are probe
-amplification assays, so method imputation adds little discriminative power
-against an already method-skewed corpus.
- 
-### Model selection rationale
- 
-The best-performing TF-IDF configuration overall (`component_weighted_method_dict`
-corpus, mixed word+char model, α=0.3, 143 distractors) achieved grouped MRR
-**0.760**. However, for the primary production-facing configuration, 
-`lcn_method_dict_combined` was selected with a simpler word unigram model and 0 distractors
-(grouped MRR **0.747**) for three reasons:
- 
-1. **Parsimony.** The 0.013 MRR gap (1.7 pp) does not justify the added
-   complexity of a mixed vectorizer and external distractor sampling.
-2. **Robustness to corpus changes.** Zero distractors means the corpus is fixed
-   at deployment time. The 143-distractor config is sensitive to which
-   non-COVID respiratory codes are included, making it harder to reason about
-   in production.
-3. **Distractor effect is unstable.** `component_weighted_method_dict` gains
-   with distractors while `lcn_method_dict_combined` degrades monotonically.
-   This inconsistency suggests the distractor benefit may not generalize beyond
-   this specific corpus.
-All subsequent analyses (filter ablation, error analysis, noise robustness)
-use the simpler `lcn_method_dict_combined`, word unigram configuration.
- 
-### Noise robustness
- 
+
+**TF-IDF wins, and that is the point.** The lexical model leads the best dense
+encoder by **0.13 in grouped MRR**. The reason is in the data: vocabulary overlap
+between the ELR query space and the LOINC corpus is only **7.8%**, so the task
+rewards exact-token matching over semantic similarity. The gap is widest on
+**analyte-only queries** (coverage pattern `A`: TF-IDF **0.737** vs ST **0.524**,
+a gap of **0.21**), where a dense encoder has no method or specimen signal to lean
+on and the lexical model still matches the analyte name directly.
+
+The oracle ceiling of 0.767 confirms the remaining headroom is genuine retrieval
+ambiguity, not something more metadata filtering could recover. The brand filter
+adds almost nothing (0.747 to 0.748) because the corpus is already skewed toward
+probe-amplification assays, so method imputation has little to disambiguate.
+
+<details>
+<summary><b>Noise robustness (per noise level)</b></summary>
+
 | Noise level | TF-IDF | Best ST |
 |---|---|---|
-| Low  | 0.762 | 0.634 |
+| Low | 0.762 | 0.634 |
 | Medium | 0.710 | 0.570 |
 | High | 0.510 | 0.457 |
- 
-TF-IDF is substantially more robust, losing 25 pp from low to high noise versus
-18 pp for the best sentence transformer. The low vocabulary coverage rate
-between the ELR query space and the LOINC corpus (7.8%) favors sparse lexical
-matching over dense semantic similarity — compression noise (surface variants
-of the same entity) is largely recovered by the retrieval-side expansion
-dictionaries, while omission noise (signal absent entirely) degrades both
-models. Detailed per-dimension noise analysis is in
-`notebooks/04_error_analysis.ipynb`.
- 
-Note that omission count correlates with method token absence (Pearson r =
-−0.73) because structural template omission and target deletion both increment
-the omission counter and both reduce method signal. Omission-stratified results
-should be interpreted in the context of coverage patterns rather than as a
-pure noise effect.
- 
+
+TF-IDF stays ahead at every level. From low to high noise it loses **0.25 in
+grouped MRR** versus **0.18** for the best sentence transformer. Compression noise
+(a token swapped for an equivalent surface form) is largely recovered by the
+retrieval-side expansion dictionaries; omission noise (signal deleted entirely)
+hurts both models.
+
+Note that omission count correlates with method-token absence (Pearson
+r = -0.73), because structural template omission and target deletion both
+increment the omission counter and both reduce method signal. Omission-stratified
+results should therefore be read alongside coverage patterns rather than as a pure
+noise effect.
+</details>
+
+<details>
+<summary><b>Why I shipped the simpler model (selection rationale)</b></summary>
+
+A more complex configuration (`component_weighted_method_dict`, mixed word and
+character model, alpha = 0.3, 143 distractors) reached **0.760**. I selected the
+simpler `lcn_method_dict_combined` word-unigram model (**0.747**) anyway, for
+three reasons:
+
+1. **Parsimony.** The **0.013 grouped-MRR gap** does not justify a mixed
+   vectorizer plus external distractor sampling.
+2. **Robustness to corpus changes.** Zero distractors means the corpus is fixed
+   at deployment, which is easier to reason about in production.
+3. **Distractor effect is unstable.** The complex config improves with distractors
+   while the simple one degrades monotonically, so the distractor benefit may not
+   generalize beyond this corpus.
+
+All downstream analyses (filters, error analysis, noise) use the simple config.
+</details>
+
 ---
- 
-## Repository structure
- 
+
+<a id="how-it-works"></a>
+
+## ⚙️ How it works
+
+```
+CDC LIVD Table ─► Preprocessing ─► Clean seeds (551 rows, 36 LOINC codes)
+                                          │
+                                   ELR simulation
+                              (~12 variants/seed → 6,600 strings)
+                                          │
+                          ┌───────────────┴───────────────┐
+                     TF-IDF retrieval            Sentence transformers
+              (98-code corpus, strategy ablation) (6 models × 2 strategies)
+                          │
+                  Post-retrieval filters (oracle / brand imputation)
+                          │
+                  Specimen-aware grouped MRR evaluation
+```
+
+In short: real CDC device submissions are turned into realistic noisy lab strings,
+those strings are matched against a 98-code LOINC corpus by cosine similarity,
+optional metadata filters rerank the candidates, and everything is scored with a
+clinically aware MRR. The depth is below.
+
+<details>
+<summary><b>Data sources</b></summary>
+
+**CDC LIVD table.** FDA-authorized SARS-CoV-2 test-kit submissions mapping devices
+to LOINC codes via vendor analyte names, specimen descriptions, and methods. It
+defines the scope: any LOINC code it references is in, covering single-analyte
+COVID codes and combination respiratory panels (flu A/B, RSV, SARS-CoV-2).
+
+**LOINC table.** Joined to LIVD on LOINC code, providing component, system, method,
+scale, and long common name for corpus construction.
+
+Raw files are not committed. LIVD:
+[CDC SARS-CoV-2 LIVD page](https://www.cdc.gov/csels/dls/livd-codes.html). LOINC:
+[loinc.org](https://loinc.org/downloads/) (free registration).
+</details>
+
+<details>
+<summary><b>Simulation design (dedup, noise taxonomy, templates)</b></summary>
+
+**Deduplication.** The raw merged LIVD table holds roughly 998 device rows. Rows
+listing multiple valid specimens (stored newline-separated) are exploded to one
+row per specimen, giving 1,829 rows across 36 codes, because specimen type is a
+simulation axis and collapsing it would suppress naming variation. These are then
+deduplicated on a clinical key (component, method, system, vendor analyte name),
+removing manufacturer redundancy while keeping genuine cross-vendor naming
+differences: 642 rows. A minimum-seeds filter (at least 3 LIVD rows per code)
+yields **551 clean seeds**, expanded to **6,600 ELR strings** (roughly 12 variants
+per seed), split 5,280 validation and 1,320 test. All reported numbers are on the
+validation split.
+
+**Noise taxonomy.** Three independently tracked dimensions, defined on the input
+string rather than on any model's reaction to it:
+
+- *Corruption*: character-level typos (swap, skip, extra), token identity partly
+  destroyed. Spaces excluded, since space insertion is not a realistic keystroke
+  error in structured fields.
+- *Compression*: a signal token replaced by an equivalent surface form
+  (`SARS-CoV-2` to `COVID-19`, `RNA` to `PCR`, `nucleocapsid` to `N-GENE`).
+  Information present but re-encoded, recoverable by a domain-aware model.
+- *Omission*: signal deleted entirely (empty replacement, or a whole component
+  structurally absent). Unrecoverable without external metadata or a
+  retrieval-side expansion dictionary.
+
+Interpretation tokens (`STATUS`, `RESULT`, `FINAL`) are appended at 10% probability
+to mimic LIS verbosity but are not counted as noise, since they do not damage
+signal and carry near-zero IDF.
+
+**Templates.** Strings are assembled from up to four components (model, analyte,
+method, specimen) under six weighted templates representing an assumed prior over
+field completeness. The dominant templates are analyte+method+specimen (30%) and
+analyte+method (30%), reflecting how often older LIS systems drop the specimen
+segment.
+
+**Coverage patterns.** Each string is scored for which signals are present:
+A (analyte), M (method), S (specimen), I (interpretation). Most common: `A+M`
+(41%), `A+M+S` (22%), `A` alone (12%).
+</details>
+
+<details>
+<summary><b>Corpus strategies (the ablation)</b></summary>
+
+The corpus is always the same 98-code surveillance panel; only the text
+representation of each code varies.
+
+- **`lcn_only`** (baseline): long common name only.
+- **`combined`**: long common name (repeated twice) + system expansion +
+  relatednames2. The repetition counteracts dilution from the long, heterogeneous
+  relatednames2 field, which inflates raw term frequencies and lowers the relative
+  weight of discriminative long-common-name tokens.
+- **`lcn_method_dict_combined`** *(overall best)*: long common name + system
+  expansion + method dictionary expansion, no repetition. Replaces generic LOINC
+  system and method values with domain surface forms (`Nph` to
+  `"Nasopharynx Nasopharyngeal NP NPH"`, `Probe.amp.tar` to
+  `"NAAT NAA PCR RT-PCR QPCR"`). It beats `combined` without repetition, which
+  means a compact method dictionary removes the dilution problem at its source
+  rather than compensating for it.
+- **`lcn_method_dict_filtered_rn`**: as above plus relatednames2 filtered to drop
+  tokens appearing in more than 85% of codes. Underperforms, so residual
+  relatednames2 content adds noise even after filtering.
+- **`component_weighted_method_dict`**: component (repeated twice) + method
+  dictionary + system expansion. Strong with distractors but unstable as
+  distractor count grows.
+
+Higher repetition counts (3x and combinations) were tested and removed; all
+performed below their lower-repetition counterparts, confirming that string
+repetition is an unreliable substitute for explicit vocabulary expansion.
+</details>
+
+<details>
+<summary><b>Post-retrieval filters and the evaluation metric</b></summary>
+
+**Oracle filter (upper bound).** Uses ground-truth method class (NAAT vs antigen)
+and specimen from the simulated row to demote mismatches (0.5x penalty), then
+re-ranks. An unrealistic but useful ceiling on what perfect metadata extraction
+could buy.
+
+**Brand filter (production-feasible).** Scans the ELR string for instrument brand
+tokens (`COBAS`, `VERITOR`, `XPERT`) and imputes method class via a curated lookup
+(`COBAS` to `probe.amp.tar`), applying the same demotion. Feasible because it needs
+only the string itself. Its effect is near zero (0.747 to 0.748), and it is
+byte-identical to no-filter across almost every coverage pattern, confirming the
+corpus is already method-skewed.
+
+**Primary metric: specimen-aware grouped MRR.** For each string, the valid answer
+set is expanded beyond the single true code to include codes sharing component and
+method with a specimen-compatible system, plus gene-target-ambiguous codes that
+vendor analyte names cannot distinguish. This handles LOINC's use of generic
+respiratory specimen codes for COVID reporting: 45.5% of wrong top-1 predictions
+are specimen-specificity mismatches (for example Nose vs Respiratory System)
+absorbed by the grouped metric rather than true retrieval failures.
+
+**Splits.** Assigned by variant number, not randomly within code, reflecting the
+deployment scenario where all codes are known at inference and generalization is
+over novel surface forms from unseen senders.
+</details>
+
+---
+
+## 🗂️ Repository structure
+
 ```
 loinc-crosswalk/
 ├── src/
-│   ├── clinical_utils.py               # Domain constants, text cleaning, specimen normalization
-│   ├── model_building_utils.py         # Corpus construction, TF-IDF index, retrieval, evaluation
-│   ├── ablation.py                     # Ablation runners: primary, secondary, filter
-│   ├── elr_simulation.py               # ELR simulation pipeline
-│   ├── sentence_transformer_ablation.py  # ST model benchmarking
-│   ├── error_analysis.py               # Error classification and visualization
-│   ├── corpus_and_simulation_viz.py    # UMAP, similarity, and simulation visualizations
-│   ├── livd_and_loinc_preprocessing.py # Raw data loading, merging, and filtering
+│   ├── clinical_utils.py                  # Domain constants, text cleaning, specimen normalization
+│   ├── model_building_utils.py            # Corpus construction, TF-IDF index, retrieval, evaluation
+│   ├── ablation.py                        # Ablation runners: primary, secondary, filter
+│   ├── elr_simulation.py                  # ELR simulation pipeline
+│   ├── sentence_transformer_ablation.py   # ST model benchmarking
+│   ├── error_analysis.py                  # Error classification and visualization
+│   ├── corpus_and_simulation_viz.py       # UMAP, similarity, simulation visuals
+│   ├── livd_and_loinc_preprocessing.py    # Raw data loading, merging, filtering
 │   └── __init__.py
 ├── notebooks/
 │   ├── ablation_results_combined.ipynb
@@ -327,18 +327,16 @@ loinc-crosswalk/
 │   ├── error_analysis.ipynb
 │   └── test_set_evaluation.ipynb
 ├── app/
-│   └── app.py                          # Streamlit portfolio dashboard
-├── logs/                               # Runtime logs (gitignored)
-├── data/                               # Raw and processed data (gitignored)
+│   └── app.py                             # Streamlit portfolio dashboard
 ├── requirements.txt
 ├── .gitignore
 └── README.md
 ```
- 
+
 ---
- 
-## Setup and reproduction
- 
+
+## 🚀 Setup and reproduction
+
 ```bash
 git clone https://github.com/<your-username>/loinc-crosswalk.git
 cd loinc-crosswalk
@@ -346,68 +344,65 @@ python -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
- 
-Place the LIVD and LOINC source files in `data/raw/` per the paths expected
-in `src/livd_and_loinc_preprocessing.py`, then run the pipeline in order:
- 
+
+Place the LIVD and LOINC source files in `data/raw/` per the paths in
+`src/livd_and_loinc_preprocessing.py`, then run in order:
+
 ```bash
-python src/livd_and_loinc_preprocessing.py  # produces data/processed/
-python src/elr_simulation.py                # produces elr_simulated.csv
-python src/ablation.py                      # produces primary and filter ablation CSVs
-python src/sentence_transformer_ablation.py # produces ST ablation CSV
+python src/livd_and_loinc_preprocessing.py   # produces data/processed/
+python src/elr_simulation.py                 # produces elr_simulated.csv
+python src/ablation.py                        # primary and filter ablation CSVs
+python src/sentence_transformer_ablation.py   # ST ablation CSV
 ```
- 
-Analysis notebooks in `notebooks/` can then be run in any order. To launch
-the Streamlit app locally:
- 
+
+Before launching the app, run the test-set evaluation notebook exactly once:
+
+```bash
+jupyter execute notebooks/test_set_evaluation.ipynb
+```
+
+This produces the summary tables the Streamlit app loads. It should be run only
+once: it evaluates the held-out test split, and re-running it after inspecting
+results would compromise the integrity of the test-set evaluation.
+
 ```bash
 streamlit run app/app.py
 ```
- 
----
- 
-## Limitations
- 
-**Simulation-based evaluation.** Generalization is over perturbation variation
-of known LOINC codes, not over truly novel lab submissions from unseen senders.
-Performance on genuinely new analyte naming conventions may differ. Validation
-against real de-identified ELR data is planned (see Future work).
- 
-**LIVD-bounded scope.** 36 LOINC codes covering COVID-19 and combination
-respiratory panels. Non-COVID respiratory codes (influenza-only, RSV-only,
-strep) are out of scope. Extension to the full respiratory panel LOINC space
-is the natural next step.
- 
-**Specimen filtering underperforms.** The dominant LOINC system value in this
-dataset is the generic `Respiratory System Specimen` catch-all, which must be
-retained for any respiratory specimen type by design. Method signal carries
-substantially more discriminative weight than specimen signal, this is a
-domain-informed finding rather than a system limitation.
- 
-**Template weights are assumed priors.** No ground truth distribution of ELR
-field completeness was available. CDC NNDSS or state health department ELR
-intake logs could provide an empirical prior for future work.
- 
----
- 
-## Future work
- 
-- Validate against real de-identified ELR submissions (MIMIC-IV access in
-  progress; CITI certification completed)
-- Extend to non-COVID respiratory LOINC codes
-- Fine-tune a sentence transformer on domain-specific clinical text
-- Add a cloud analytics layer (BigQuery + dbt) as a companion forecasting
-  project
----
- 
-## Acknowledgements
- 
-LOINC codes and terminology are provided by the Regenstrief Institute and
-are used in accordance with the [LOINC license](https://loinc.org/license/).
-The CDC LIVD table for SARS-CoV-2 is a public domain resource made available
-by the Centers for Disease Control and Prevention. This project is not
-affiliated with or endorsed by either organization.
- 
+
+The remaining analysis notebooks (`ablation_results_combined`, `corpus_simulation_viz`,
+`error_analysis`) can run in any order and do not affect the app.
+
 ---
 
- 
+## ⚠️ Limitations
+
+- **Simulation-based.** Generalization is over perturbations of known LOINC codes,
+  not over genuinely novel submissions from unseen senders. Validation against real
+  de-identified ELR data is planned.
+- **LIVD-bounded scope.** 98-code surveillance corpus, 36 codes with ELR data,
+  covering COVID and combination respiratory panels. Influenza-only, RSV-only, and
+  strep are out of scope; the full respiratory space is the natural extension.
+- **Specimen filtering is weak by design.** The dominant system value is the
+  generic `Respiratory System Specimen` catch-all, so method signal carries far
+  more discriminative weight than specimen. This is a domain finding, not a bug.
+- **Template weights are assumed priors.** No ground-truth field-completeness
+  distribution was available; CDC NNDSS or state ELR intake logs could supply one.
+
+---
+
+## 🔭 Future work
+
+- Validate against real de-identified ELR submissions (PhysioNet / MIMIC-IV access
+  in progress; CITI certification complete).
+- Extend to non-COVID respiratory LOINC codes.
+- Fine-tune a domain sentence transformer on clinical text.
+- Add a BigQuery and dbt analytics layer as a companion project.
+
+---
+
+## 📄 Acknowledgements
+
+LOINC codes and terminology are provided by the Regenstrief Institute and used per
+the [LOINC license](https://loinc.org/license/). The CDC LIVD table is a
+public-domain CDC resource. This project is not affiliated with or endorsed by
+either organization.

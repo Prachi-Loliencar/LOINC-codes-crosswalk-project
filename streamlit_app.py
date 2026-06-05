@@ -240,10 +240,11 @@ def load_filter_coverage():
 def load_filter_noise():
     """
     Filter × noise dimension summaries. Returns a dict keyed by noise column name.
-    Keys: noise_level, noise_omission, noise_compression.
-    Used by Tab 7 section C val-side noise breakdown.
+    Keys: noise_level, noise_omission, noise_compression, noise_corruption.
+    Used by Tab 7 section C val-side noise breakdown and Tab 6 section D
+    TF-IDF baseline for the by-dimension head-to-head.
     """
-    dims = ["noise_level", "noise_omission", "noise_compression"]
+    dims = ["noise_level", "noise_omission", "noise_compression", "noise_corruption"]
     return {
         dim: pd.read_parquet(f"{SUMMARY_DIR}/filter_by_{dim}.parquet") for dim in dims
     }
@@ -293,13 +294,25 @@ def load_st_coverage():
 @st.cache_data
 def load_st_noise():
     """
-    ST × noise_level summary.
-    Columns: model_type, strategy, noise_level, mrr_grouped, n.
+    ST × noise dimension summaries. Returns a dict keyed by noise column name.
+    Keys: noise_level, noise_omission, noise_compression, noise_corruption.
+    Each value: model_type, strategy, <dim>, mrr_grouped, n, model_label.
+
+    The ST ablation writes one parquet per dimension
+    (st_by_noise_level.parquet, st_by_noise_omission.parquet,
+    st_by_noise_compression.parquet, st_by_noise_corruption.parquet), so this
+    loader reads all four rather than a single st_by_noise.parquet.
     Used by Tab 6 section D noise robustness.
     """
-    df = pd.read_parquet(f"{SUMMARY_DIR}/st_by_noise.parquet")
-    df["model_label"] = df["model_type"].map(ST_MODEL_LABELS).fillna(df["model_type"])
-    return df
+    dims = ["noise_level", "noise_omission", "noise_compression", "noise_corruption"]
+    out = {}
+    for dim in dims:
+        df = pd.read_parquet(f"{SUMMARY_DIR}/st_by_noise_{dim}.parquet")
+        df["model_label"] = (
+            df["model_type"].map(ST_MODEL_LABELS).fillna(df["model_type"])
+        )
+        out[dim] = df
+    return out
 
 
 @st.cache_data
@@ -505,8 +518,16 @@ with st.sidebar:
         st.divider()
         st.markdown(
             "**Metric:** Specimen-aware grouped MRR  \n"
-            "Equivalence groups account for LOINC's catchall vs specific specimen system ambiguity.",
-            help="mrr_grouped treats clinically equivalent LOINC codes as correct retrievals",
+            "Two equivalence tiers are credited as correct: (a) **clinically equivalent** "
+            "codes (same component and method, differing only in LOINC's catchall-vs-specific "
+            "specimen system, a registry artifact), and (b) **surveillance-equivalent** codes "
+            "(a different SARS-CoV-2 gene target that is usually indistinguishable in the ELR "
+            "string and interchangeable for surveillance, though not the same measured analyte).",
+            help=(
+                "mrr_grouped credits specimen catchall-vs-specific artifacts and "
+                "surveillance-equivalent gene-target codes. The gene-target case is "
+                "surveillance-equivalent, not clinically equivalent."
+            ),
         )
 
         st.divider()
@@ -528,15 +549,492 @@ with st.sidebar:
             help="Recomputes on change — may take a few seconds",
         )
 
+
+# ---------------------------------------------------------------------------
+# Live retrieval demo (rendered inside Tab 1; defined here to keep the
+# Overview body readable and the demo trivially repositionable)
+# ---------------------------------------------------------------------------
+def render_live_demo():
+    @st.cache_resource
+    def build_demo_index():
+        """
+        Builds the TF-IDF retrieval index using the best ablation config:
+          corpus_strategy : lcn_method_dict_combined
+          model_type      : tfidf_word (1,1)
+        Returns (vectorizer, nn_index, df_loinc_corpus).
+        """
+        from src.clinical_utils import clean_text as _ct
+        from src.model_building_utils import (
+            expand_loinc_lcn,
+            build_corpus,
+            build_tfidf_index,
+            build_nn_index,
+            compute_relatednames_stopwords,
+        )
+
+        loinc = pd.read_csv("data/processed/covid_surveillance_loinc.csv")
+        loinc = loinc[~loinc.method_typ.isna()].copy()
+        loinc["expanded_lcn"] = loinc["long_common_name"].map(_ct).map(expand_loinc_lcn)
+        rn_stopwords = compute_relatednames_stopwords(loinc, threshold=0.85)
+        corpus = build_corpus(loinc, "lcn_method_dict_combined", rn_stopwords)
+        loinc["corpus_text"] = corpus
+        vectorizer, corpus_matrix = build_tfidf_index(corpus, "tfidf_word", (1, 1))
+        nn = build_nn_index(corpus_matrix, n_neighbors=5)
+        return vectorizer, nn, loinc
+
+    @st.cache_data
+    def loinc_lcn_map():
+        """Maps each LOINC code to its long common name (for ground-truth display)."""
+        loinc = pd.read_csv("data/processed/covid_surveillance_loinc.csv")
+        return dict(
+            zip(
+                loinc["loinc_num"].astype(str),
+                loinc["long_common_name"].astype(str),
+            )
+        )
+
+    input_mode = st.radio(
+        "Input mode",
+        ["Worked example", "Sample by coverage pattern", "Custom string"],
+        horizontal=True,
+        key="demo_input_mode",
+    )
+
+    # Plain-language meaning of each coverage pattern. A = analyte, M = method,
+    # S = specimen, I = interpretation token.
+    PATTERN_MEANING = {
+        "A": "analyte only",
+        "M": "method only",
+        "S": "specimen only",
+        "I": "interpretation only",
+        "A+M": "analyte + method",
+        "A+S": "analyte + specimen",
+        "A+I": "analyte + interpretation",
+        "M+S": "method + specimen",
+        "M+I": "method + interpretation",
+        "S+I": "specimen + interpretation",
+        "A+M+S": "analyte + method + specimen",
+        "A+M+I": "analyte + method + interpretation",
+        "A+S+I": "analyte + specimen + interpretation",
+        "M+S+I": "method + specimen + interpretation",
+        "A+M+S+I": "analyte + method + specimen + interpretation",
+        "NONE": "no recognized signal tokens",
+    }
+
+    # Curated, reproducible worked examples. Each carries authentic ground-truth
+    # metadata (verified against the validation ablation) so the ranked result,
+    # the exact-match check, and the grouped-equivalence logic render the same way
+    # every time. All three are exact top-1 matches at HIGH confidence with a
+    # positive score gap.
+    SHOWCASE_EXAMPLES = {
+        "Noisy input, still correct (typo + surface swap + dropped method)": {
+            "elr_name": "COVID-19 RDRP GENE FINAL - EXPECTORATED SPUTUM",
+            "true_loinc": "94534-5",
+            "coverage_pattern": "A+S+I",
+            "noise_corruption": 1,
+            "noise_compression": 1,
+            "noise_omission": 1,
+            "has_method": False,
+            "has_specimen": True,
+            "specimen_norm": "SPUTUM",
+        },
+        "Vendor brand, full signal (influenza, not COVID)": {
+            "elr_name": "LUMIRADX INFLUENZA B RT-PCR NASOPHARYNGEAL SWAB",
+            "true_loinc": "76080-1",
+            "coverage_pattern": "A+M+S",
+            "noise_corruption": 0,
+            "noise_compression": 1,
+            "noise_omission": 0,
+            "has_method": True,
+            "has_specimen": True,
+            "specimen_norm": "NP",
+        },
+        "Clean SARS-CoV-2 NAAT (nasopharyngeal)": {
+            "elr_name": "SARS-COV-2 PCR NASOPHARYNGEAL ASPIRATE SWAB",
+            "true_loinc": "94759-8",
+            "coverage_pattern": "A+M+S",
+            "noise_corruption": 0,
+            "noise_compression": 1,
+            "noise_omission": 0,
+            "has_method": True,
+            "has_specimen": True,
+            "specimen_norm": "NP",
+        },
+    }
+
+    _META_KEYS = (
+        "true_loinc",
+        "coverage_pattern",
+        "noise_corruption",
+        "noise_compression",
+        "noise_omission",
+        "has_method",
+        "has_specimen",
+        "specimen_norm",
+    )
+
+    def _pattern_tfidf_mrr():
+        """coverage_pattern -> mean grouped MRR for THIS demo's TF-IDF retriever.
+
+        Pulled live from filter_by_coverage (no-filter, lcn_method_dict_combined,
+        the same config the demo retrieves with). It is therefore model-specific
+        and an average over the pattern: the coverage pattern only flags which
+        signal types are detected, not every token, so an individual string can
+        map better or worse than its pattern average. Shown as an expectation,
+        not a per-string difficulty label.
+        """
+        try:
+            sub = df_filter_coverage[df_filter_coverage["filter_applied"] == "none"]
+            return dict(zip(sub["coverage_pattern"], sub["mrr_grouped"].astype(float)))
+        except Exception:
+            return {}
+
+    def _set_loaded_sample(elr_name, meta):
+        st.session_state["demo_elr_input"] = elr_name
+        st.session_state["demo_elr_meta"] = meta
+
+    def _render_loaded_sample():
+        """Render the loaded ELR string, its metadata strip, and the true LCN.
+
+        Shared by the Worked-example and Sample-by-pattern modes. Returns the
+        string to retrieve, or None if nothing is loaded.
+        """
+        if "demo_elr_input" not in st.session_state:
+            return None
+        st.code(st.session_state["demo_elr_input"], language="text")
+        meta = st.session_state.get("demo_elr_meta", {})
+        _noise_display = (
+            f"{meta.get('noise_corruption', 0)} typo · "
+            f"{meta.get('noise_compression', 0)} swap · "
+            f"{meta.get('noise_omission', 0)} dropped"
+        )
+        # Sample metadata is context, not a result, so render it compactly
+        # rather than with the large-font st.metric used for headline numbers.
+        meta_fields = [
+            ("True LOINC", meta.get("true_loinc", "—")),
+            ("Coverage Pattern", meta.get("coverage_pattern", "—")),
+            ("Noise (by operation)", _noise_display),
+            ("Has Method", "Yes" if meta.get("has_method") else "No"),
+            ("Has Specimen", "Yes" if meta.get("has_specimen") else "No"),
+        ]
+        meta_cols = st.columns(5)
+        for _col, (_label, _value) in zip(meta_cols, meta_fields):
+            _col.markdown(
+                f"<div style='font-size:0.72rem;color:#6b7280;"
+                f"text-transform:uppercase;letter-spacing:0.03em;'>{_label}</div>"
+                f"<div style='font-size:1.0rem;font-weight:600;line-height:1.3;'>"
+                f"{_value}</div>",
+                unsafe_allow_html=True,
+            )
+        st.caption(
+            "‘Noise (by operation)’ counts the edits applied to the clean seed: "
+            "character typos, equivalent surface-form swaps (for example "
+            "`SARS-CoV-2` rewritten as `COVID-19`), and dropped tokens. It "
+            "describes the perturbation applied, not the difficulty."
+        )
+        # True LOINC description (the ground-truth LCN), shown with the other
+        # sample values so the strip is self-explanatory and the reader can
+        # compare it against the retrieved candidate descriptions below.
+        try:
+            _true_lcn = loinc_lcn_map().get(str(meta.get("true_loinc", "")), "—")
+        except Exception:
+            _true_lcn = "—"
+        st.markdown(
+            f"<div style='font-size:0.72rem;color:#6b7280;text-transform:uppercase;"
+            f"letter-spacing:0.03em;margin-top:0.35rem;'>True LOINC Description</div>"
+            f"<div style='font-size:1.0rem;font-weight:600;line-height:1.3;'>"
+            f"{_true_lcn}</div>",
+            unsafe_allow_html=True,
+        )
+        return st.session_state["demo_elr_input"]
+
+    # auto_retrieve lets the Worked-example mode show a finished result on landing,
+    # without an extra click, while only running once per example selection.
+    auto_retrieve = False
+
+    if input_mode == "Worked example":
+        st.caption(
+            "Curated examples with known answers, so the ranked result and its "
+            "exact-match check are the same every time. Pick one and it runs "
+            "automatically."
+        )
+        choice = st.selectbox(
+            "Example",
+            options=list(SHOWCASE_EXAMPLES.keys()),
+            key="demo_showcase_choice",
+        )
+        ex = SHOWCASE_EXAMPLES[choice]
+        _set_loaded_sample(ex["elr_name"], {k: ex[k] for k in _META_KEYS})
+        if st.session_state.get("demo_last_shown") != ex["elr_name"]:
+            auto_retrieve = True
+        elr_to_retrieve = _render_loaded_sample()
+
+    elif input_mode == "Sample by coverage pattern":
+        diff = _pattern_tfidf_mrr()
+        df_val = None
+        available = []
+        try:
+            df_val = load_elr()
+            if "split" in df_val.columns:
+                df_val = df_val[df_val["split"] == "val"]
+            # Order the picker by this retriever's mean MRR per pattern so the
+            # gradient is legible: strongest-retrieving patterns first.
+            available = sorted(
+                df_val["coverage_pattern"].dropna().unique(),
+                key=lambda p: diff.get(p, 0.0),
+                reverse=True,
+            )
+        except FileNotFoundError:
+            st.warning(
+                "`data/processed/elr_simulated.csv` not found. "
+                "Run `elr_simulation.py` first."
+            )
+
+        if available:
+
+            def _fmt(p):
+                return f"{p}  ·  {PATTERN_MEANING.get(p, p)}"
+
+            sel = st.selectbox(
+                "Coverage pattern (which signal types are present in the string)",
+                options=available,
+                format_func=_fmt,
+                key="demo_cov_pattern",
+                help=(
+                    "A = analyte, M = method, S = specimen, I = interpretation. "
+                    "How hard a string is to map depends mostly on which signals "
+                    "are present, so richer patterns tend to map more reliably."
+                ),
+            )
+            c_btn, c_hint = st.columns([1, 2])
+            with c_btn:
+                do_sample = st.button("🎲 Sample from this pattern", key="demo_random")
+            with c_hint:
+                _m = diff.get(sel)
+                if _m is not None:
+                    st.caption(
+                        f"Strings with pattern **{sel}** ({PATTERN_MEANING.get(sel, sel)}) "
+                        f"retrieve at a mean grouped MRR of **{_m:.2f}** for this demo's "
+                        "TF-IDF retriever on validation."
+                    )
+
+            if do_sample and df_val is not None:
+                pool = df_val[df_val["coverage_pattern"] == sel]
+                if len(pool):
+                    sample = pool.sample(1, random_state=None).iloc[0]
+                    _set_loaded_sample(
+                        sample["elr_name"],
+                        {
+                            "true_loinc": sample.get("loinc_num", "—"),
+                            "coverage_pattern": sample.get("coverage_pattern", "—"),
+                            "noise_corruption": int(sample.get("noise_corruption", 0)),
+                            "noise_compression": int(
+                                sample.get("noise_compression", 0)
+                            ),
+                            "noise_omission": int(sample.get("noise_omission", 0)),
+                            "has_method": bool(sample.get("has_method", False)),
+                            "has_specimen": bool(sample.get("has_specimen", False)),
+                            "specimen_norm": sample.get("specimen_norm", "UNKNOWN"),
+                        },
+                    )
+
+        elr_to_retrieve = _render_loaded_sample()
+        if elr_to_retrieve is None:
+            st.info(
+                "Pick a coverage pattern, then click **Sample from this pattern** "
+                "to begin. Try a rich pattern like `A+M+S` for an easy case, then a "
+                "sparse one like `A` or `M` to see where retrieval gets hard."
+            )
+
+    else:  # Custom string
+        custom_input = st.text_input(
+            "Enter a COVID-19 ELR string:",
+            placeholder="e.g. COVID-19 PCR NASOPHARYNGEAL SWAB",
+            key="demo_custom_input",
+        )
+        elr_to_retrieve = custom_input.strip() if custom_input.strip() else None
+        if elr_to_retrieve:
+            st.caption(
+                "Custom strings are preprocessed with `clean_text` + `normalize_elr` "
+                "before retrieval, the same pipeline as the ablation evaluation. "
+                "Ground-truth checks (the exact-match marker) only appear for the "
+                "worked examples and sampled strings, where the true code is known."
+            )
+
+    st.markdown("<div style='margin-top:0.9rem;'></div>", unsafe_allow_html=True)
+    run_retrieval = st.button(
+        "▶ Retrieve",
+        key="demo_retrieve",
+        type="primary",
+        disabled=(elr_to_retrieve is None),
+    ) or (auto_retrieve and elr_to_retrieve is not None)
+
+    if run_retrieval and elr_to_retrieve:
+        # Record what we just retrieved so the Worked-example auto-run fires once
+        # per selection rather than on every rerun.
+        st.session_state["demo_last_shown"] = elr_to_retrieve
+        try:
+            from src.clinical_utils import clean_text as _ct2
+            from src.model_building_utils import normalize_elr as _ne, retrieve
+
+            normalized = _ne(_ct2(elr_to_retrieve))
+
+            with st.spinner("Retrieving…"):
+                vec, nn, df_corpus = build_demo_index()
+                candidates = retrieve(normalized, vec, df_corpus, nn)
+
+            top_score = candidates.iloc[0]["base_score"]
+            score_gap = (
+                top_score - candidates.iloc[1]["base_score"]
+                if len(candidates) > 1
+                else 0.0
+            )
+            q33, q67 = 0.35, 0.55
+            tier = (
+                "🟢 HIGH"
+                if top_score >= q67
+                else "🟡 MEDIUM"
+                if top_score >= q33
+                else "🔴 LOW, manual review recommended"
+            )
+
+            st.markdown(
+                "<hr style='margin:0.4rem 0 0.8rem 0;border:none;"
+                "border-top:1px solid #e5e7eb;'>",
+                unsafe_allow_html=True,
+            )
+            col_norm, col_conf = st.columns(2)
+            with col_norm:
+                st.markdown("**Normalized query (retrieval input):**")
+                st.code(normalized, language="text")
+            with col_conf:
+                st.markdown("**Retrieval confidence:**")
+                st.markdown(f"**{tier}**")
+                st.caption(
+                    f"Top cosine score: `{top_score:.3f}` · Score gap: `{score_gap:.3f}`  \n"
+                    "Confidence tiers use val-set quantile thresholds, "
+                    "recalibrate on real ELR data for production use."
+                )
+
+            true_loinc = st.session_state.get("demo_elr_meta", {}).get("true_loinc")
+            if input_mode == "Custom string":
+                true_loinc = None
+
+            st.markdown("#### Top-5 LOINC Candidates")
+
+            valid_loincs = set()
+            if true_loinc and true_loinc != "—":
+                try:
+                    from src.model_building_utils import get_valid_loincs
+
+                    elr_meta = st.session_state.get("demo_elr_meta", {})
+                    elr_row_for_grouping = pd.Series(
+                        {"specimen_norm": elr_meta.get("specimen_norm", "UNKNOWN")}
+                    )
+                    valid_loincs = get_valid_loincs(
+                        elr_row_for_grouping, df_corpus, true_loinc
+                    )
+                except Exception:
+                    valid_loincs = {true_loinc}
+
+            for _, row in candidates.iterrows():
+                is_exact = (true_loinc is not None) and (row["loinc_num"] == true_loinc)
+                is_equivalent = (
+                    (true_loinc is not None)
+                    and (row["loinc_num"] in valid_loincs)
+                    and not is_exact
+                )
+                rank_icon = "🥇" if row["rank"] == 1 else f"#{int(row['rank'])}"
+
+                if is_exact:
+                    result_tag = "  ✅ exact match"
+                elif is_equivalent:
+                    result_tag = "  🟦 clinically equivalent"
+                else:
+                    result_tag = ""
+
+                with st.expander(
+                    f"{rank_icon}  `{row['loinc_num']}`  —  "
+                    f"score: {row['base_score']:.3f}{result_tag}",
+                    expanded=(row["rank"] == 1),
+                ):
+                    st.markdown(f"**{row['long_common_name']}**")
+                    if is_equivalent:
+                        st.caption(
+                            "🟦 Clinically equivalent to ground truth: same component "
+                            "and method, compatible specimen system. Counted as correct "
+                            "under specimen-aware grouped MRR."
+                        )
+                    elif is_exact:
+                        st.caption("✅ Exact match with ground truth LOINC code.")
+                    st.caption(
+                        f"Corpus text (truncated): `{str(row['corpus_text'])[:130]}…`"
+                    )
+
+            if true_loinc and true_loinc != "—":
+                predicted = candidates.iloc[0]["loinc_num"]
+                predicted_is_valid = (
+                    predicted in valid_loincs or predicted == true_loinc
+                )
+                valid_in_top5 = any(
+                    c in valid_loincs or c == true_loinc
+                    for c in candidates["loinc_num"].values
+                )
+
+                if predicted == true_loinc:
+                    st.success(
+                        f"✅ Top-1 exact match: ground truth `{true_loinc}` ranked first."
+                    )
+                elif predicted_is_valid:
+                    st.success(
+                        f"🟦 Top-1 clinically equivalent: `{predicted}` shares the same "
+                        f"component and method as ground truth `{true_loinc}` with a "
+                        f"compatible specimen system. Counted as correct under grouped MRR."
+                    )
+                elif valid_in_top5:
+                    best_valid_rank = min(
+                        int(
+                            candidates.loc[candidates["loinc_num"] == c, "rank"].values[
+                                0
+                            ]
+                        )
+                        for c in candidates["loinc_num"].values
+                        if c in valid_loincs or c == true_loinc
+                    )
+                    st.warning(
+                        f"⚠️ A clinically valid code is ranked #{best_valid_rank}: "
+                        f"not top-1 but within top-5. Ground truth: `{true_loinc}`."
+                    )
+                else:
+                    true_lcn = df_corpus[df_corpus["loinc_num"] == true_loinc][
+                        "long_common_name"
+                    ].values
+                    true_lcn_str = true_lcn[0] if len(true_lcn) > 0 else "—"
+                    n_valid = len(valid_loincs)
+                    st.error(
+                        f"❌ No clinically valid code in top-5.  \n"
+                        f"**Ground truth:** `{true_loinc}` — {true_lcn_str}  \n"
+                        f"**Valid equivalence set size:** {n_valid} code(s)  \n"
+                        "Check the coverage pattern and noise breakdown above for context."
+                    )
+
+        except FileNotFoundError as e:
+            st.error(
+                f"Required data file not found: `{e}`.  \n"
+                "Run preprocessing and simulation scripts before launching the app."
+            )
+        except Exception as e:
+            st.error(f"Retrieval error: `{e}`")
+
+
 # ---------------------------------------------------------------------------
 # Main content
 # ---------------------------------------------------------------------------
-st.title("LOINC Crosswalk: Electronic Lab Record to LOINC Code Retrieval Benchmark")
+st.title("LOINC Crosswalk: Mapping Noisy Lab Test Names to Standard Medical Codes")
 st.markdown(
-    "TF-IDF retrieval system mapping noisy COVID-19 Electronic Lab Report test name strings  "
-    "to standardized LOINC codes. LOINC (Logical Observation Identifiers Names and Codes) is a universal standard for identifying medical laboratory tests - a shared vocabulary that allows different hospitals, labs, and health systems to refer to the same test using the same code, regardless of what the local instrument or lab vendor calls it. "
-    "Evaluated via **specimen-aware grouped MRR** across "
-    "a structured ablation of corpus design, vectorizer type, and post-retrieval filtering."
+    "**Given a messy, real-world laboratory COVID-19 test name, this system retrieves the correct "
+    "standardized medical code from a candidate list. A simple TF-IDF retriever reaches "
+    "grouped MRR 0.747 and beats six biomedical neural models.**"
 )
 
 if not data_loaded:
@@ -554,11 +1052,11 @@ if not data_loaded:
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
     [
         "Overview",
-        "Primary Ablation",
-        "Coverage Analysis",
-        "Filter Ablation",
+        "What Drives Accuracy",
+        "Performance by Input Type",
+        "Metadata Filters",
         "Simulation & Corpus",
-        "TF-IDF vs Sentence Transformers",
+        "TF-IDF vs Transformers",
         "Test Set Results",
     ]
 )
@@ -567,27 +1065,40 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
 # TAB 1 — Overview
 # ===========================================================================
 with tab1:
-    st.markdown("### What This Project Does")
-    st.markdown("""
-Real-world Electronic Lab Reports (ELRs) contain free-text or semi-structured test name strings
-that vary widely across laboratories, including, abbreviations, typos, missing fields and instrument-specific
-naming conventions. Mapping these to standardized **LOINC codes** is a recurring bottleneck
-in public health informatics.
+    # -----------------------------------------------------------------------
+    # The problem (shown, not just described)
+    # -----------------------------------------------------------------------
+    st.markdown("### The problem")
+    st.markdown(
+        "Hospitals, labs, and instrument vendors all describe the same lab test differently, "
+        "with abbreviations, vendor names, typos, and missing fields. These three strings "
+        "all point to the *same* COVID-19 PCR test:"
+    )
+    st.code(
+        "COVID PCR NP Swab\nSARS-CoV-2 NAA Nasopharyngeal\ncobas SARS2 PCR",
+        language="text",
+    )
+    st.markdown(
+        "**LOINC** (Logical Observation Identifiers Names and Codes) is the universal standard "
+        "that lets every system refer to that test with one shared code. Mapping free-text lab "
+        "names onto LOINC is a recurring bottleneck in public health data. This project frames it "
+        "as an **information retrieval and entity resolution** problem: given a noisy lab string, "
+        "retrieve the correct LOINC code from a 98-code candidate corpus. It benchmarks classic "
+        "**TF-IDF** retrieval against biomedical **sentence transformers** under realistic typo, "
+        "surface-form, and missing-field conditions, using simulated Electronic Lab Report (ELR) "
+        "data built from CDC device submissions."
+    )
 
-This project builds a **TF-IDF retrieval system** that maps simulated noisy COVID-19 related ELR strings
-to the correct LOINC code, evaluated against 98 COVID-19 SARS-CoV-2 LOINC codes. A sentence transformer comparison establishes whether dense retrieval adds value over the sparse TF-IDF baseline for this terminological task.        """)
-
-    st.markdown("### Project at a Glance")
-
-    # Key result metrics — df_primary is already aggregated (one row per config)
+    # -----------------------------------------------------------------------
+    # Project at a glance (four headline metrics)
+    # -----------------------------------------------------------------------
+    st.markdown("### Project at a glance")
     best_config = df_primary.loc[df_primary["mrr_grouped"].idxmax()]
     best_mrr = best_config["mrr_grouped"]
     best_top1 = best_config["top1"]
     best_top3 = best_config["top3"]
     n_loinc_codes = int(best_config.get("n_loinc_codes", 36))
-    n_elr_strings = int(best_config["n"])
 
-    # Load test results for the delta display (non-blocking)
     df_test_ov, test_loaded_ov = load_test_results()
     test_nf_mrr = None
     if test_loaded_ov and not df_test_ov.empty:
@@ -603,13 +1114,13 @@ to the correct LOINC code, evaluated against 98 COVID-19 SARS-CoV-2 LOINC codes.
             f"{best_mrr:.3f}",
             delta=delta_str,
             delta_color="off",
-            help="Validation set MRR (best ablation config). Delta shows held-out test set result.",
+            help="Validation-set grouped MRR for the best config. Delta shows the held-out test result.",
         )
     with col2:
         st.metric(
             "Top-1 Accuracy",
             f"{best_top1:.1%}",
-            help="Exact LOINC code match at rank 1 (validation set)",
+            help="Exact LOINC match at rank 1 (validation set)",
         )
     with col3:
         st.metric("Top-3 Accuracy", f"{best_top3:.1%}")
@@ -617,28 +1128,47 @@ to the correct LOINC code, evaluated against 98 COVID-19 SARS-CoV-2 LOINC codes.
         st.metric(
             "LOINC Codes Evaluated",
             str(n_loinc_codes),
-            help="COVID-19 SARS-CoV-2 codes only",
+            help="36 codes are evaluated; retrieval runs against the full 98-code COVID-19 corpus.",
         )
 
-    col5, col6 = st.columns(2)
-    with col5:
-        st.metric(
-            "Best Corpus Strategy",
-            CORPUS_LABELS.get(
-                best_config["corpus_strategy"], best_config["corpus_strategy"]
-            ),
-            help="Long common name with method tokens expanded via a dictionary",
-        )
-    with col6:
-        st.metric(
-            "Vectorizer",
-            MODEL_LABELS.get(best_config["model_desc"], best_config["model_desc"]),
-            help=f"{int(best_config['n_distractors'])} non-COVID distractor codes added to corpus",
-        )
+    # -----------------------------------------------------------------------
+    # Live demo (moved to the top, framed as the centerpiece)
+    # -----------------------------------------------------------------------
     st.divider()
+    st.markdown("### ▶ Try it: live retrieval demo")
+    st.markdown(
+        "*The fastest way to see what this does. Start with a curated worked example "
+        "(it runs on its own), pick a coverage pattern to explore how much signal "
+        "survives in the string, or type your own. The system ranks the five most "
+        "likely LOINC codes and checks itself against the known answer.*"
+    )
+    st.caption(
+        "⚠️ Covers COVID-19 SARS-CoV-2 surveillance codes only (36 evaluated, 98 in the corpus). "
+        "Unrelated strings still return a ranked result, but it will not be meaningful."
+    )
+    with st.container(border=True):
+        render_live_demo()
 
-    st.markdown("### Pipeline")
-    st.markdown("""
+    # -----------------------------------------------------------------------
+    # How it works (three plain steps; full pipeline behind an expander)
+    # -----------------------------------------------------------------------
+    st.divider()
+    st.markdown("### How it works")
+    c1, c2, c3 = st.columns(3)
+    c1.markdown(
+        "**1 · Simulate**\n\nGenerate realistic noisy ELR strings from CDC LIVD vendor names, "
+        "with controlled typos, equivalent surface-form swaps, and dropped fields."
+    )
+    c2.markdown(
+        "**2 · Build the corpus**\n\nExpand each LOINC code's formal description with domain "
+        "dictionaries so it matches the surface forms labs actually use."
+    )
+    c3.markdown(
+        "**3 · Retrieve and rank**\n\nVectorize the query, score it against every candidate code "
+        "by cosine similarity, and return the top five."
+    )
+    with st.expander("Full 7-stage pipeline (technical)"):
+        st.markdown("""
 1. **Preprocessing:** Merge CDC LIVD device submissions with the LOINC table;
    explode multi-specimen rows; deduplicate on a clinical key; filter to ≥3 seeds per LOINC code
 2. **ELR Simulation:** Generate realistic noisy lab strings from LIVD vendor analyte names
@@ -646,19 +1176,33 @@ to the correct LOINC code, evaluated against 98 COVID-19 SARS-CoV-2 LOINC codes.
    compression (alternate surface forms of the same semantic entity), and omission (signal deleted entirely)
 3. **Corpus Construction:** 5 corpus strategies combining LOINC long common names, method token
    dictionaries, system expansions, and filtered RelatedNames2
-4. **TF-IDF Retrieval:**  Word, character, and mixed vectorizers (α controls word vs char contribution);
+4. **TF-IDF Retrieval:** Word, character, and mixed vectorizers (α controls word vs char contribution);
    cosine similarity via nearest-neighbour index
 5. **Evaluation:** Specimen-aware grouped MRR; equivalence grouping absorbs LOINC's
    catchall vs specific specimen ambiguity
-6. **Post-Retrieval Filtering:**  Oracle filter (ground-truth metadata upper bound) and
-   brand-imputation filter (production-feasible) evaluated on the best config
+6. **Post-Retrieval Filtering:** Oracle filter (ground truth metadata upper bound) and
+   brand imputation filter (production feasible) evaluated on the best config
 7. **Sentence Transformer Retrieval:** 6 models × 2 corpus strategies; natural language
    corpus without TF-IDF tokenization to preserve semantic structure
         """)
 
+    # -----------------------------------------------------------------------
+    # Key findings (skimmable; detail behind an expander)
+    # -----------------------------------------------------------------------
     st.divider()
-    st.markdown("### Key Findings")
-    st.markdown("""
+    st.markdown("### Key findings")
+    st.markdown(
+        "- A simple **TF-IDF** retriever reached **grouped MRR 0.747**, beating the best of six "
+        "biomedical sentence transformers by about **+0.13 MRR**.\n"
+        "- Its edge is largest on the hardest inputs (analyte-only strings, **+0.21 MRR**), where "
+        "neural models cannot recover signal that is simply missing from the query.\n"
+        "- An **oracle filter ceiling of 0.767** shows most remaining error is genuine retrieval "
+        "ambiguity, not something better metadata would fix.\n"
+        "- **The biggest lever was domain vocabulary engineering, not model complexity.** That is "
+        "the main takeaway."
+    )
+    with st.expander("Detailed technical findings"):
+        st.markdown("""
 - **The vocabulary gap is the central challenge.** Only 7.8% of ELR query tokens appear
   in the raw LOINC table. Real-world lab senders use abbreviations, brand names, and informal
   terminology that LOINC's formal vocabulary doesn't anticipate. Every major design decision
@@ -690,8 +1234,8 @@ to the correct LOINC code, evaluated against 98 COVID-19 SARS-CoV-2 LOINC codes.
   extraction would gain 0.064 MRR on `M+S` and 0.038 on `A+M+S`, but only 0.008 on `A`
   and nothing on `I`. Specimen signal is present in the ELR string for these patterns but
   the corpus does not fully leverage it without filtering. The brand filter contributes
-  effectively zero lift across all patterns — it fires only when a model token is present,
-  which is rare in the val set — confirming the negligible overall gain of 0.001 MRR
+  effectively zero lift across all patterns - it fires only when a model token is present,
+  which is rare in the val set, confirming the negligible overall gain of 0.001 MRR
   (0.747 → 0.748).
 
 - **ST wins only on method-absent, interpretation token strings.** Sentence transformer
@@ -700,342 +1244,67 @@ to the correct LOINC code, evaluated against 98 COVID-19 SARS-CoV-2 LOINC codes.
   on all other 14 coverage patterns, with the largest advantages on `S` (0.248 MRR) and
   `A` (0.213 MRR).
 
-- **Catchall vs specific ambiguity is a corpus artifact, not a retrieval failure.** 
+- **Catchall vs specific ambiguity is a corpus artifact, not a retrieval failure.**
   33.6% of wrong top-1 predictions are catchall-to-specific system mismatches. Of these,
   53% are absorbed by specimen-aware grouped MRR as clinically equivalent retrievals,
   confirming the issue is a LOINC device registry artifact. The remaining genuine retrieval
   failures (14.8% of the val set with MRR=0) are concentrated in low-information coverage
   patterns (`I`, `NONE`, `M+I`).
-    """)
+        """)
 
+    # -----------------------------------------------------------------------
+    # Reference material (collapsed; off the skim path)
+    # -----------------------------------------------------------------------
     st.divider()
-    st.markdown("### Live Retrieval Demo")
-    st.markdown(
-        "Sample a random ELR string from the validation set and retrieve the top-5 "
-        "LOINC candidates using the best TF-IDF configuration from the ablation "
-        "(`lcn_method_dict_combined` · word unigrams). "
-        "Click repeatedly to see different difficulty levels and coverage patterns."
-    )
-    st.caption(
-        "⚠️ This system covers **COVID-19 SARS-CoV-2 surveillance codes only** (36 LOINC codes). "
-        "Custom strings unrelated to COVID-19 will still return a ranked result as "
-        "the nearest-neighbor index always retrieves, but the output will not be meaningful."
-    )
-
-    # ------------------------------------------------------------------
-    # Index — built once and cached for the session lifetime
-    # ------------------------------------------------------------------
-    @st.cache_resource
-    def build_demo_index():
-        """
-        Builds the TF-IDF retrieval index using the best ablation config:
-          corpus_strategy : lcn_method_dict_combined
-          model_type      : tfidf_word (1,1)
-        Returns (vectorizer, nn_index, df_loinc_corpus).
-        """
-        from src.clinical_utils import clean_text as _ct
-        from src.model_building_utils import (
-            expand_loinc_lcn,
-            build_corpus,
-            build_tfidf_index,
-            build_nn_index,
-            compute_relatednames_stopwords,
+    with st.expander("How accuracy is measured (grouped MRR)"):
+        st.markdown("The primary metric is **Mean Reciprocal Rank (MRR)**:")
+        st.latex(r"\text{MRR} = \frac{1}{|Q|} \sum_{i=1}^{|Q|} \frac{1}{\text{rank}_i}")
+        st.markdown(
+            r"where $Q$ is the set of queries, $|Q|$ is the number of queries, and $\text{rank}_i$ refers to the rank the model gives the true label for the $i$th query."
         )
-
-        loinc = pd.read_csv("data/processed/covid_surveillance_loinc.csv")
-        loinc = loinc[~loinc.method_typ.isna()].copy()
-        loinc["expanded_lcn"] = loinc["long_common_name"].map(_ct).map(expand_loinc_lcn)
-        rn_stopwords = compute_relatednames_stopwords(loinc, threshold=0.85)
-        corpus = build_corpus(loinc, "lcn_method_dict_combined", rn_stopwords)
-        loinc["corpus_text"] = corpus
-        vectorizer, corpus_matrix = build_tfidf_index(corpus, "tfidf_word", (1, 1))
-        nn = build_nn_index(corpus_matrix, n_neighbors=5)
-        return vectorizer, nn, loinc
-
-    # ------------------------------------------------------------------
-    # Input controls
-    # ------------------------------------------------------------------
-    input_mode = st.radio(
-        "Input mode",
-        ["Random from validation set", "Custom string"],
-        horizontal=True,
-        key="demo_input_mode",
-    )
-
-    if input_mode == "Random from validation set":
-        if st.button("🎲 Sample random ELR string", key="demo_random"):
-            try:
-                df_val = load_elr()
-                # Filter to val split if the split column exists
-                if "split" in df_val.columns:
-                    df_val = df_val[df_val["split"] == "val"]
-                sample = df_val.sample(1, random_state=None).iloc[0]
-                st.session_state["demo_elr_input"] = sample["elr_name"]
-                st.session_state["demo_elr_meta"] = {
-                    "true_loinc": sample.get("loinc_num", "—"),
-                    "coverage_pattern": sample.get("coverage_pattern", "—"),
-                    "noise_level": sample.get("noise_level", "—"),
-                    "noise_total": int(sample.get("noise_total", 0)),
-                    "has_method": bool(sample.get("has_method", False)),
-                    "has_specimen": bool(sample.get("has_specimen", False)),
-                    "specimen_norm": sample.get("specimen_norm", "UNKNOWN"),
-                }
-            except FileNotFoundError:
-                st.warning(
-                    "`data/processed/elr_simulated.csv` not found. "
-                    "Run `elr_simulation_main.py` first."
-                )
-
-        # Show the sampled string if one is in session state
-        if "demo_elr_input" in st.session_state:
-            st.code(st.session_state["demo_elr_input"], language="text")
-            meta = st.session_state.get("demo_elr_meta", {})
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("True LOINC", meta.get("true_loinc", "—"))
-            m2.metric("Coverage Pattern", meta.get("coverage_pattern", "—"))
-            m3.metric("Noise Level", str(meta.get("noise_level", "—")).title())
-            m4.metric("Has Method", "Yes" if meta.get("has_method") else "No")
-            m5.metric("Has Specimen", "Yes" if meta.get("has_specimen") else "No")
-            elr_to_retrieve = st.session_state["demo_elr_input"]
-        else:
-            elr_to_retrieve = None
-            st.info("Click **Sample random ELR string** to begin.")
-
-    else:  # Custom string
-        custom_input = st.text_input(
-            "Enter a COVID-19 ELR string:",
-            placeholder="e.g. COVID-19 PCR NASOPHARYNGEAL SWAB",
-            key="demo_custom_input",
+        st.markdown(
+            "LOINC axes do not uniquely identify codes, so exact-match MRR would "
+            "penalize predictions that are interchangeable with the ground truth. "
+            "**Grouped MRR** instead builds an equivalence set per query and counts a "
+            "prediction as correct if it lands in that set. Two tiers are credited:"
         )
-        elr_to_retrieve = custom_input.strip() if custom_input.strip() else None
-        if elr_to_retrieve:
-            st.caption(
-                "Custom strings are preprocessed with `clean_text` + `normalize_elr` "
-                "before retrieval — same pipeline as the ablation evaluation."
-            )
-
-    # ------------------------------------------------------------------
-    # Retrieval — fires when input is available and button clicked
-    # ------------------------------------------------------------------
-    run_retrieval = st.button(
-        "▶ Retrieve",
-        key="demo_retrieve",
-        type="primary",
-        disabled=(elr_to_retrieve is None),
-    )
-
-    if run_retrieval and elr_to_retrieve:
-        try:
-            from src.clinical_utils import clean_text as _ct2
-            from src.model_building_utils import normalize_elr as _ne, retrieve
-
-            normalized = _ne(_ct2(elr_to_retrieve))
-
-            with st.spinner("Retrieving…"):
-                vec, nn, df_corpus = build_demo_index()
-                candidates = retrieve(normalized, vec, df_corpus, nn)
-
-            top_score = candidates.iloc[0]["base_score"]
-            score_gap = (
-                top_score - candidates.iloc[1]["base_score"]
-                if len(candidates) > 1
-                else 0.0
-            )
-            # Approximate val-set quantile thresholds
-            q33, q67 = 0.35, 0.55
-            tier = (
-                "🟢 HIGH"
-                if top_score >= q67
-                else "🟡 MEDIUM"
-                if top_score >= q33
-                else "🔴 LOW — manual review recommended"
-            )
-
-            st.markdown("---")
-            col_norm, col_conf = st.columns(2)
-            with col_norm:
-                st.markdown("**Normalized query (retrieval input):**")
-                st.code(normalized, language="text")
-            with col_conf:
-                st.markdown("**Retrieval confidence:**")
-                st.markdown(f"**{tier}**")
-                st.caption(
-                    f"Top cosine score: `{top_score:.3f}` · Score gap: `{score_gap:.3f}`  \n"
-                    "Confidence tiers use val-set quantile thresholds — "
-                    "recalibrate on real ELR data for production use."
-                )
-
-            st.markdown("#### Top-5 LOINC Candidates")
-
-            # If we have the true LOINC from a val set sample, annotate it
-            true_loinc = st.session_state.get("demo_elr_meta", {}).get("true_loinc")
-            if input_mode == "Custom string":
-                true_loinc = None
-
-            # Compute the grouped equivalence set for the true LOINC so we can
-            # correctly label clinically valid retrievals that are not exact matches.
-            # This mirrors the grouped MRR logic used in the ablation evaluation.
-            valid_loincs = set()
-            if true_loinc and true_loinc != "—":
-                try:
-                    from src.model_building_utils import get_valid_loincs
-
-                    elr_meta = st.session_state.get("demo_elr_meta", {})
-                    elr_row_for_grouping = pd.Series(
-                        {
-                            "specimen_norm": elr_meta.get("specimen_norm", "UNKNOWN"),
-                        }
-                    )
-                    valid_loincs = get_valid_loincs(
-                        elr_row_for_grouping, df_corpus, true_loinc
-                    )
-                except Exception:
-                    # Fallback: exact match only if grouping fails
-                    valid_loincs = {true_loinc}
-
-            for _, row in candidates.iterrows():
-                is_exact = (true_loinc is not None) and (row["loinc_num"] == true_loinc)
-                is_equivalent = (
-                    (true_loinc is not None)
-                    and (row["loinc_num"] in valid_loincs)
-                    and not is_exact
-                )
-                rank_icon = "🥇" if row["rank"] == 1 else f"#{int(row['rank'])}"
-
-                if is_exact:
-                    result_tag = "  ✅ exact match"
-                elif is_equivalent:
-                    result_tag = "  🟦 clinically equivalent"
-                else:
-                    result_tag = ""
-
-                with st.expander(
-                    f"{rank_icon}  `{row['loinc_num']}`  —  "
-                    f"score: {row['base_score']:.3f}{result_tag}",
-                    expanded=(row["rank"] == 1),
-                ):
-                    st.markdown(f"**{row['long_common_name']}**")
-                    if is_equivalent:
-                        st.caption(
-                            "🟦 Clinically equivalent to ground truth — same component "
-                            "and method, compatible specimen system. Counted as correct "
-                            "under specimen-aware grouped MRR."
-                        )
-                    elif is_exact:
-                        st.caption("✅ Exact match with ground truth LOINC code.")
-                    st.caption(
-                        f"Corpus text (truncated): `{str(row['corpus_text'])[:130]}…`"
-                    )
-
-            # Ground truth outcome summary for val set samples
-            if true_loinc and true_loinc != "—":
-                predicted = candidates.iloc[0]["loinc_num"]
-                predicted_is_valid = (
-                    predicted in valid_loincs or predicted == true_loinc
-                )
-                true_in_top5 = true_loinc in candidates["loinc_num"].values
-                valid_in_top5 = any(
-                    c in valid_loincs or c == true_loinc
-                    for c in candidates["loinc_num"].values
-                )
-
-                if predicted == true_loinc:
-                    st.success(
-                        f"✅ Top-1 exact match — ground truth `{true_loinc}` ranked first."
-                    )
-                elif predicted_is_valid:
-                    st.success(
-                        f"🟦 Top-1 clinically equivalent — `{predicted}` shares the same "
-                        f"component and method as ground truth `{true_loinc}` with a "
-                        f"compatible specimen system. Counted as correct under grouped MRR."
-                    )
-                elif valid_in_top5:
-                    # Find the best-ranked valid code
-                    best_valid_rank = min(
-                        int(
-                            candidates.loc[candidates["loinc_num"] == c, "rank"].values[
-                                0
-                            ]
-                        )
-                        for c in candidates["loinc_num"].values
-                        if c in valid_loincs or c == true_loinc
-                    )
-                    st.warning(
-                        f"⚠️ A clinically valid code is ranked #{best_valid_rank} — "
-                        f"not top-1 but within top-5. "
-                        f"Ground truth: `{true_loinc}`."
-                    )
-                else:
-                    true_lcn = df_corpus[df_corpus["loinc_num"] == true_loinc][
-                        "long_common_name"
-                    ].values
-                    true_lcn_str = true_lcn[0] if len(true_lcn) > 0 else "—"
-                    n_valid = len(valid_loincs)
-                    st.error(
-                        f"❌ No clinically valid code in top-5.  \n"
-                        f"**Ground truth:** `{true_loinc}` — {true_lcn_str}  \n"
-                        f"**Valid equivalence set size:** {n_valid} code(s)  \n"
-                        "Check coverage pattern and noise level above for context."
-                    )
-
-        except FileNotFoundError as e:
-            st.error(
-                f"Required data file not found: `{e}`.  \n"
-                "Run preprocessing and simulation scripts before launching the app."
-            )
-        except Exception as e:
-            st.error(f"Retrieval error: `{e}`")
-
-    st.divider()
-    st.markdown("### Evaluation metric")
-    st.markdown(
-        """The evaluation metric primarily used for the ablation is the **Mean Reciprocal Rank (MRR)**:"""
-    )
-    st.latex(r"\text{MRR} = \frac{1}{|Q|} \sum_{i=1}^{|Q|} \frac{1}{\text{rank}_i}")
-    st.markdown(
-        "Since LOINC axes do not uniquely identify codes, particularly the **specimen system** axis, "
-        "where manufacturers inconsistently chose between specific codes (e.g., `Nph` for nasopharynx) "
-        "and catchall codes (e.g., `Respiratory System Specimen`) for clinically identical tests,"
-        "exact-match MRR would penalize correct predictions. "
-        "\n\n"
-        "**Grouped MRR** instead defines an equivalence set per ELR query that includes all clinically valid LOINC codes "
-        "(same component and method, compatible specimen system). A prediction is correct if it lands in this set. "
-        "This separates genuine retrieval failures from device registry artifacts and is the appropriate metric "
-        "for evaluating health informatics systems where clinical correctness doesn't necessarily coincide with database exactness."
-    )
-
-    #    col_left, col_right = st.columns([1.1, 0.9])
-
-    # with col_left:
-
-    #    with col_right:
-
-    # st.markdown("### Best Configuration")
-    # st.info(
-    #     f"**Corpus:** {CORPUS_LABELS.get(best_config['corpus_strategy'], best_config['corpus_strategy'])}  \n"
-    #     f"**Vectorizer:** {MODEL_LABELS.get(best_config['model_desc'], best_config['model_desc'])}  \n"
-    #     f"**Distractors:** {int(best_config['n_distractors'])} non-COVID respiratory codes  \n"
-    #     f"**Grouped MRR:** {best_mrr:.3f}"
-    # )
-
-    st.markdown("### Variable Description")
-    st.markdown("""
-        - **long_common_name (LCN):**  Natural language text in the LOINC including a description of all the axes of the test              
-        - **system/specimen/specimen_norm:**  Describes the location the specimen is taken from (eg. "Nasopharynx" )
-        - **method/method_typ:** Describes the type of test, broadly divided into two classes - NAAT and antigen
-        - **model:** The specific model of the test kit or instrument (manufacturer specific)
-        - **analyte/component:** Describes the component of the specimen that is being tested (eg. RNA)
-        - **relatednames2:** Provides a list of synonyms, keywords, abbreviations, and related terms associated with a LOINC code (including method)
-        - **method_class:** Class describing the method - can be either NAAT or Antigen.""")
-
-    st.markdown("### Data Sources")
-    st.markdown("""
-    | Source | Description |
-    |--------|-------------|
-    | CDC LIVD Table | FDA-authorized device submissions mapping kits to LOINC |
-    | LOINC Table | Component, system, method, long common name |
-    | Simulated ELR | Generated from LIVD vendor analyte names + perturbations |
-            """)
+        st.markdown(
+            """
+- **Clinically equivalent:** same component and method, differing only in LOINC's
+  catchall-vs-specific specimen system. Manufacturers chose inconsistently between
+  specific codes (e.g. `Nph`) and catchall codes (e.g. `Respiratory System Specimen`)
+  for clinically identical tests, so this tier is a device-registry artifact, not a
+  real difference in the measured test.
+- **Surveillance-equivalent:** a different SARS-CoV-2 gene target (e.g. RdRp vs N gene).
+  These are usually indistinguishable in the ELR string and interchangeable for
+  surveillance reporting, but they are *not* the same measured analyte, so this tier is
+  surveillance-equivalent, not clinically equivalent.
+            """
+        )
+        st.markdown(
+            "Grouping this way separates genuine retrieval failures from registry "
+            "artifacts and from surveillance-interchangeable gene targets. Exact top-1 "
+            "match is reported separately, so a grouped credit is never mistaken for an "
+            "exact hit."
+        )
+    with st.expander("Field glossary"):
+        st.markdown("""
+- **long_common_name (LCN):** Natural-language LOINC text describing all axes of the test
+- **system / specimen / specimen_norm:** Where the specimen is taken from (e.g. "Nasopharynx")
+- **method / method_typ:** The type of test, broadly NAAT or antigen
+- **model:** The specific test kit or instrument (manufacturer-specific)
+- **analyte / component:** The component being tested (e.g. RNA)
+- **relatednames2:** Synonyms, keywords, and abbreviations associated with a LOINC code
+- **method_class:** Class describing the method, either NAAT or Antigen
+        """)
+    with st.expander("Data sources"):
+        st.markdown("""
+| Source | Description |
+|--------|-------------|
+| CDC LIVD Table | FDA-authorized device submissions mapping kits to LOINC |
+| LOINC Table | Component, system, method, long common name |
+| Simulated ELR | Generated from LIVD vendor analyte names + perturbations |
+        """)
 
 
 # ===========================================================================
@@ -1043,6 +1312,11 @@ to the correct LOINC code, evaluated against 98 COVID-19 SARS-CoV-2 LOINC codes.
 # ===========================================================================
 with tab2:
     st.markdown("### Primary Ablation: Corpus Strategy × Vectorizer × Distractor Count")
+    st.markdown(
+        "*Which design choices actually moved retrieval accuracy: how the candidate "
+        "text is built (corpus strategy), how it is vectorized, and whether extra "
+        "non-COVID codes are added to sharpen term weighting (distractors).*"
+    )
     st.markdown("""
         - **Corpus Strategy** tests the use of different columns of the LOINC table and method of expanding tokens to match ELR language ([see descriptions of strategies](#strategy-definitions)). 
         - **Vectorizer** choices for the TF-IDF vectorizer included the choice of Word-based, Char-based and mixed models as well as the choice of n-grams.   
@@ -1235,6 +1509,11 @@ with tab2:
 with tab3:
     st.markdown("### Retrieval Performance by ELR Information Content")
     st.markdown(
+        "*How accuracy changes with how much information the query carries. Each ELR "
+        "string is tagged by which signals are present: analyte (A), method (M), "
+        "specimen (S), and interpretation token (I).*"
+    )
+    st.markdown(
         "Coverage pattern encodes which signal types are present in the ELR string: "
     )
     st.markdown(""" 
@@ -1297,9 +1576,6 @@ with tab3:
         )
         cov_summary = cov_summary.sort_values("coverage_pattern")
 
-        # col_a, col_b = st.columns(2)
-
-        # with col_a:
         fig_cov = go.Figure()
         fig_cov.add_trace(
             go.Bar(
@@ -1332,7 +1608,6 @@ with tab3:
         )
         st.plotly_chart(fig_cov, use_container_width=True)
 
-        # with col_b:
         st.markdown("**Per-pattern breakdown**")
         display_cols = {
             "coverage_pattern": "Pattern",
@@ -1379,7 +1654,6 @@ with tab3:
 
             fig_heat = px.imshow(
                 heat_pivot.round(3).T,
-                #  color_continuous_scale="Blues",
                 zmin=0,
                 zmax=1,
                 text_auto=".3f",
@@ -1398,11 +1672,16 @@ with tab3:
 # ===========================================================================
 with tab4:
     st.markdown("### Post-Retrieval Filter Ablation")
+    st.markdown(
+        "*Whether re-ranking results using test metadata (method class, specimen, "
+        "instrument brand) improves accuracy, and how much of that lift is realistic "
+        "in production versus an idealized upper bound.*"
+    )
     st.markdown("""
 Three conditions evaluated on the best corpus+vectorizer config:
 - **No filter:** pure TF-IDF ranked list
-- **Oracle filter:** ground-truth method class + specimen used to demote mismatching candidates *(upper bound, not production-achievable)*
-- **Brand filter:** instrument brand tokens in the ELR string used to impute method class *(inference-time, production-realistic)*
+- **Oracle filter:** ground-truth method class + specimen used to demote mismatching candidates *(upper bound, not production achievable)*
+- **Brand filter:** instrument brand tokens in the ELR string used to impute method class *(inference time, production realistic)*
 
 Target population: `has_method=0` rows where TF-IDF alone cannot distinguish method from token signal.
     """)
@@ -1594,6 +1873,11 @@ Target population: `has_method=0` rows where TF-IDF alone cannot distinguish met
 # ===========================================================================
 with tab5:
     st.markdown("### Simulation Quality & Corpus Geometry")
+    st.markdown(
+        "*A look under the hood: is the simulated noise realistic and independent "
+        "across dimensions, and does the corpus actually separate one LOINC code "
+        "from another?*"
+    )
     st.markdown(
         "This tab diagnoses the simulation pipeline and the TF-IDF corpus structure. "
     )
@@ -1972,7 +2256,7 @@ with tab5:
     st.markdown(
         "Token frequency comparison between the expanded LOINC corpus (index side) "
         "and normalized ELR strings (query side). "
-        "Divergences — tokens common on one side but absent on the other — "
+        "Divergences, i.e. tokens common on one side but absent on the other, "
         "point to genuine vocabulary gaps that TF-IDF cannot bridge without expansion."
     )
 
@@ -2272,6 +2556,10 @@ with tab5:
 with tab6:
     st.markdown("### TF-IDF vs Sentence Transformers")
     st.markdown(
+        "*Head-to-head between the sparse TF-IDF retriever and six biomedical neural "
+        "models, showing where each approach wins and where it fails.*"
+    )
+    st.markdown(
         "Both approaches were evaluated on the same simulated ELR validation set. "
         "TF-IDF used the best config from the primary ablation (`lcn_method_dict_combined`, "
         "word unigrams). ST models were evaluated under two corpus conditions: "
@@ -2445,7 +2733,7 @@ with tab6:
     st.markdown(
         "Comparing the best ST model (S-PubMedBert-MS-MARCO, regular corpus) against "
         "TF-IDF by coverage pattern reveals a consistent structural advantage for ST "
-        "on **interpretation token strings** (patterns containing `I`), primarily due to these non-informative tokens diluting the TF values of other tokens in the query."
+        "on **interpretation token strings** (patterns containing `I`), primarily due to these non-informative tokens diluting the TF values of other tokens in the query. "
         "TF-IDF dominates on all other patterns, particularly those with analyte and method tokens."
     )
 
@@ -2544,100 +2832,189 @@ with tab6:
     )
 
     # -----------------------------------------------------------------------
-    # SECTION D — Noise robustness
+    # SECTION D — Noise robustness, decomposed by edit operation
     # -----------------------------------------------------------------------
     st.markdown("---")
-    st.markdown("#### D · Noise Robustness")
+    st.markdown("#### D · Noise Robustness, by Edit Operation")
     st.markdown(
-        "TF-IDF is remarkably stable across noise levels as the explicit method token dictionary "
-        "provides robust signal even under high character corruption. Most ST models degrade "
-        "under high noise, with MiniLM showing the sharpest drop. "
-        "S-PubMedBert-MS-MARCO is the most noise robust ST model."
+        'Robustness here is **two-sided**, not a blanket "TF-IDF is more robust." '
+        "Both behaviours follow from TF-IDF being a lexical method-matcher: it scores "
+        "ELR strings by token overlap with the LOINC vocabulary, so it survives **omission** "
+        "(the tokens that remain still match) but is more exposed to **corruption** "
+        "(a typo'd token no longer matches under word unigrams)."
+    )
+    st.warning(
+        "The aggregate `noise_level` (low / medium / high) is an **edit-operation count, "
+        "not a difficulty axis**. It conflates three independent operations, and the "
+        "omission count in particular is entangled with method-token survival, which is the "
+        "dominant retrieval driver. This section therefore decomposes noise by individual "
+        "operation. **Corruption is the clean, monotonic axis**: it damages characters "
+        "without changing whether the method token is present (`has_method` stays near 0.77 "
+        "across all corruption levels), so it isolates token-level robustness. Omission and "
+        "compression are non-monotonic precisely because they shift `has_method`.",
+        icon="⚠️",
     )
 
-    # Use df_st_noise summary — no per-row groupby needed
-    noise_rows = []
-    for model_type, label in ST_MODEL_LABELS.items():
-        sub = (
-            df_st_noise[
-                (df_st_noise["model_type"] == model_type)
-                & (df_st_noise["strategy"] == "regular_corpus")
-            ]
-            .set_index("noise_level")["mrr_grouped"]
-            .round(3)
-        )
-        noise_rows.append(
-            {
-                "Model": label,
-                "Low noise": float(sub.get("low", 0) or 0),
-                "Medium noise": float(sub.get("medium", 0) or 0),
-                "High noise": float(sub.get("high", 0) or 0),
-                "High−Low": round(
-                    float(sub.get("high", 0) or 0) - float(sub.get("low", 0) or 0), 3
-                ),
-            }
-        )
+    BEST_ST = "pritamdeka/S-PubMedBert-MS-MARCO"
 
-    # Add TF-IDF reference
-    noise_rows.insert(
-        0,
-        {
-            "Model": "✦ TF-IDF (best config)",
-            "Low noise": TFIDF_REF["noise"]["low"],
-            "Medium noise": TFIDF_REF["noise"]["medium"],
-            "High noise": TFIDF_REF["noise"]["high"],
-            "High−Low": round(
-                TFIDF_REF["noise"]["high"] - TFIDF_REF["noise"]["low"], 3
-            ),
-        },
-    )
-    noise_df = pd.DataFrame(noise_rows)
+    def _noise_h2h(dim: str) -> pd.DataFrame:
+        """TF-IDF (no_filter) vs best ST (S-PubMedBert, regular) by a noise dim.
 
-    col_d1, col_d2 = st.columns([1.4, 1])
+        Reads directly from the per-dimension summary parquets:
+          filter_by_{dim}.parquet   (filter_applied == 'none')
+          st_by_noise_{dim}.parquet (S-PubMedBert × regular_corpus)
+        Returns a frame indexed by the dimension level with TF-IDF, ST and lead.
+        """
+        tf = df_filter_noise[dim][
+            df_filter_noise[dim]["filter_applied"] == "none"
+        ].set_index(dim)["mrr_grouped"]
+        st_sub = df_st_noise[dim]
+        st_best = st_sub[
+            (st_sub["model_type"] == BEST_ST) & (st_sub["strategy"] == "regular_corpus")
+        ].set_index(dim)["mrr_grouped"]
+        out = pd.DataFrame({"TF-IDF": tf, "S-PubMedBert (regular)": st_best}).dropna()
+        out["TF-IDF lead"] = (out["TF-IDF"] - out["S-PubMedBert (regular)"]).round(3)
+        return out.sort_index()
+
+    # --- D.1 Corruption head-to-head (the clean axis) ----------------------
+    st.markdown("##### D.1 · Corruption: the clean axis")
+    corr = _noise_h2h("noise_corruption")
+
+    col_d1, col_d2 = st.columns([1.5, 1])
     with col_d1:
-        noise_plot = noise_df.melt(
-            id_vars="Model",
-            value_vars=["Low noise", "Medium noise", "High noise"],
-            var_name="Noise Level",
-            value_name="Grouped MRR",
+        fig_corr = go.Figure()
+        fig_corr.add_trace(
+            go.Scatter(
+                name="TF-IDF (best config)",
+                x=corr.index,
+                y=corr["TF-IDF"],
+                mode="lines+markers+text",
+                line=dict(color="#3b82f6", width=3),
+                marker=dict(size=9),
+                text=[f"{v:.3f}" for v in corr["TF-IDF"]],
+                textposition="top center",
+            )
         )
-        fig_noise = px.line(
-            noise_plot,
-            x="Noise Level",
-            y="Grouped MRR",
-            color="Model",
-            markers=True,
-            color_discrete_sequence=px.colors.qualitative.Set2,
-            category_orders={
-                "Noise Level": ["Low noise", "Medium noise", "High noise"]
-            },
-            height=360,
+        fig_corr.add_trace(
+            go.Scatter(
+                name="S-PubMedBert (regular)",
+                x=corr.index,
+                y=corr["S-PubMedBert (regular)"],
+                mode="lines+markers+text",
+                line=dict(color="#f97316", width=3),
+                marker=dict(size=9),
+                text=[f"{v:.3f}" for v in corr["S-PubMedBert (regular)"]],
+                textposition="bottom center",
+            )
         )
-        fig_noise.update_layout(
-            yaxis=dict(range=[0, 0.85]),
-            legend=dict(orientation="v", x=1.02, y=1),
-            margin=dict(l=0, r=0, t=20, b=10),
+        fig_corr.update_layout(
+            title="Grouped MRR vs Character Corruption (typos per string)",
+            xaxis=dict(
+                title="Corruption count",
+                tickmode="array",
+                tickvals=list(corr.index),
+            ),
+            yaxis=dict(range=[0, 0.85], title="Grouped MRR"),
+            legend=dict(orientation="h", yanchor="bottom", y=0.8, x=0.7),
+            height=380,
+            margin=dict(l=0, r=0, t=60, b=40),
         )
-        st.plotly_chart(fig_noise, use_container_width=True)
+        st.plotly_chart(fig_corr, use_container_width=True)
 
     with col_d2:
-        st.markdown("**High−Low delta** (negative = degrades under noise)")
+        st.markdown("**TF-IDF lead, by corruption level**")
+        lead_tbl = corr.reset_index().rename(columns={"noise_corruption": "Corruption"})
         st.dataframe(
-            noise_df[["Model", "Low noise", "Medium noise", "High noise", "High−Low"]]
-            .style.format(
+            lead_tbl.style.format(
                 {
-                    "Low noise": "{:.3f}",
-                    "Medium noise": "{:.3f}",
-                    "High noise": "{:.3f}",
-                    "High−Low": "{:+.3f}",
+                    "TF-IDF": "{:.3f}",
+                    "S-PubMedBert (regular)": "{:.3f}",
+                    "TF-IDF lead": "{:+.3f}",
                 }
-            )
-            .highlight_max(subset=["High−Low"], color="#bbf7d0")
-            .highlight_min(subset=["High−Low"], color="#fee2e2"),
+            ),
             hide_index=True,
             use_container_width=True,
-            height=300,
         )
+        first_lead = corr["TF-IDF lead"].iloc[0]
+        last_lead = corr["TF-IDF lead"].iloc[-1]
+        st.caption(
+            f"Both methods decline monotonically as typos accumulate. TF-IDF's lead "
+            f"narrows from {first_lead:+.3f} (clean) to {last_lead:+.3f} (2 typos): "
+            "this is the brittle side. Word-unigram TF-IDF cannot match a corrupted "
+            "token, so each typo removes matchable signal, while the dense encoder "
+            "degrades more gracefully on perturbed surface forms. TF-IDF still leads "
+            "at every level."
+        )
+
+    # --- D.2 All three operations side by side -----------------------------
+    st.markdown("##### D.2 · All three operations")
+    st.markdown(
+        "TF-IDF leads the best ST model at **every level of every operation**. "
+        "On omission the lead is widest exactly where the method token is dropped "
+        "(omission = 1, `has_method` ≈ 0.05), where TF-IDF still matches the surviving "
+        "analyte and specimen tokens while the encoder loses its strongest cue. "
+        "Omission and compression are non-monotonic because their levels do not map "
+        "cleanly onto difficulty, they shuffle method-token presence rather than steadily "
+        "removing signal."
+    )
+
+    dims_meta = [
+        ("noise_corruption", "Corruption (typos)"),
+        ("noise_omission", "Omission (tokens dropped)"),
+        ("noise_compression", "Compression (surface-form swap)"),
+    ]
+    fig_dims = make_subplots(
+        rows=1,
+        cols=3,
+        subplot_titles=[label for _, label in dims_meta],
+        shared_yaxes=True,
+        horizontal_spacing=0.05,
+    )
+    for i, (dim, _label) in enumerate(dims_meta, start=1):
+        h2h = _noise_h2h(dim)
+        show_legend = i == 1
+        fig_dims.add_trace(
+            go.Scatter(
+                name="TF-IDF",
+                x=h2h.index,
+                y=h2h["TF-IDF"],
+                mode="lines+markers",
+                line=dict(color="#3b82f6", width=2.5),
+                marker=dict(size=7),
+                legendgroup="tfidf",
+                showlegend=show_legend,
+            ),
+            row=1,
+            col=i,
+        )
+        fig_dims.add_trace(
+            go.Scatter(
+                name="S-PubMedBert (regular)",
+                x=h2h.index,
+                y=h2h["S-PubMedBert (regular)"],
+                mode="lines+markers",
+                line=dict(color="#f97316", width=2.5),
+                marker=dict(size=7),
+                legendgroup="st",
+                showlegend=show_legend,
+            ),
+            row=1,
+            col=i,
+        )
+        fig_dims.update_xaxes(tickmode="array", tickvals=list(h2h.index), row=1, col=i)
+    fig_dims.update_yaxes(range=[0, 0.85], title_text="Grouped MRR", row=1, col=1)
+    fig_dims.update_layout(
+        height=360,
+        legend=dict(orientation="h", yanchor="bottom", y=1.12, x=0.5),
+        margin=dict(l=0, r=0, t=60, b=30),
+    )
+    st.plotly_chart(fig_dims, use_container_width=True)
+    st.caption(
+        #       "All three panels render live from the per-dimension summary parquets "
+        #       "(filter_by_noise_*.parquet for TF-IDF, st_by_noise_*.parquet for ST). "
+        "Only the corruption panel (left) is monotonic; the omission and compression "
+        "panels zig-zag because their counts are entangled with method-token survival."
+    )
 
     # -----------------------------------------------------------------------
     # SECTION E — has_method stratification
@@ -2711,19 +3088,29 @@ with tab6:
     st.markdown("---")
     st.markdown("#### F · Summary: Complementary Failure Modes")
     st.info(
-        "**TF-IDF dominates overall** (0.735 vs 0.617 best ST grouped MRR) because the "
+        "**TF-IDF dominates overall** (0.747 vs 0.617 best ST grouped MRR, a +0.130 gap "
+        "using the best ST model on its best corpus) because the "
         "retrieval signal is terminological (abbreviation and token matching between ELR strings and "
         "LOINC vocabulary) which explicit method token dictionaries handle precisely.  \n\n"
-        "**ST shows a relative advantage on I-pattern strings** (+0.128 to +0.365 "
-        "over TF-IDF on patterns containing interpretation tokens), where tokens like 'RESULT' and 'FINAL' dilute the term frequency of discriminative signal tokens in TF-IDF queries. ST is less sensitive to this dilution because it encodes the full sequence rather than a bag of token counts. This is not recovered by the TF-IDF brand filter, which addresses method imputation rather than noise sensitivity.  \n\n"
+        "**ST shows a relative advantage on interpretation-heavy strings**, the patterns where "
+        "TF-IDF has the least to match: it leads TF-IDF by +0.128 on pattern `I` "
+        "(interpretation tokens only) and +0.089 on `M+I`, the only two coverage patterns where "
+        "ST wins. Tokens like 'RESULT' and 'FINAL' dilute the term frequency of discriminative "
+        "signal tokens in TF-IDF queries; ST is less sensitive because it encodes the full "
+        "sequence rather than a bag of token counts. This is not recovered by the TF-IDF brand "
+        "filter, which addresses method imputation rather than noise sensitivity.  \n\n"
         "**Boosting hurts most ST models** as appending structured LOINC field text fragments "
         "semantic embeddings for general purpose encoders. SapBERT is the exception, benefiting "
         "from the additional entity context due to its biomedical synonym training objective.  \n\n"
-        "**Noise robustness favours TF-IDF** as explicit token matching is stable across noise "
-        "levels. MiniLM degrades sharply under high noise (high−low = +0.197 for TF-IDF vs "
-        "−0.197 for MiniLM), limiting its reliability in realistic ELR conditions.  \n\n"
-        "**Natural next step**: a hybrid or ensemble approach, TF-IDF for method rich strings, "
-        "ST for interpretation only strings, could combine both strengths without their respective weaknesses."
+        "**Noise robustness is two-sided.** On the clean corruption axis both methods decline "
+        "monotonically and TF-IDF's lead narrows from +0.138 (clean) to +0.069 (2 typos), since "
+        "word-unigram TF-IDF cannot match a corrupted token. On omission TF-IDF leads at every "
+        "level and most widely (+0.192) exactly where the method token is dropped, because it "
+        "still matches the surviving tokens. "
+        # "The aggregate `noise_level` is not used here: it is "
+        # "an edit-operation count entangled with method-token survival, not a difficulty axis.  \n\n"
+        # "**Natural next step**: a hybrid or ensemble approach, TF-IDF for method rich strings, "
+        # "ST for interpretation only strings, could combine both strengths without their respective weaknesses."
     )
 
 
@@ -2733,8 +3120,12 @@ with tab6:
 with tab7:
     st.markdown("### Test Set Evaluation")
     st.markdown(
+        "*Does the result hold on data never used for tuning? The single best "
+        "configuration is frozen and re-run on a held-out test split.*"
+    )
+    st.markdown(
         "The simulated ELRs were split into val and test sets stratified by the LOINC codes to ensure similar distributions (since no model training is done, a train split is not required). All configs are fixed from the validation ablation. This tab "
-        "confirms generalization, not selecting anything new."
+        "confirms generalization."
     )
     st.info(
         "**Fixed config:** `lcn_method_dict_combined` · word unigrams · 0 distractors  \n"
@@ -2760,15 +3151,29 @@ with tab7:
     CONDITION_LABELS_T = {
         "no_filter": "No Filter (production config)",
         "oracle_filter": "Oracle Filter (upper bound)",
-        "brand_filter": "Brand Filter (production-feasible)",
+        "brand_filter": "Brand Filter (production feasible)",
     }
 
-    # df_filter is pre-aggregated with filter_applied column (not filter_condition)
+    # df_filter is pre-aggregated with filter_applied column (not filter_condition).
+    # Its labels (none/oracle/brand) differ from the test-side filter_condition labels
+    # (no_filter/oracle_filter/brand_filter), so normalize the validation side to the
+    # test scheme before joining; otherwise the index sets are disjoint and the join
+    # plus reindex collapse the whole headline table to NaN.
+    VAL_TO_TEST_COND = {
+        "none": "no_filter",
+        "oracle": "oracle_filter",
+        "brand": "brand_filter",
+    }
+    df_filter_t = df_filter.copy()
+    df_filter_t["filter_condition"] = (
+        df_filter_t["filter_applied"]
+        .map(VAL_TO_TEST_COND)
+        .fillna(df_filter_t["filter_applied"])
+    )
     val_headline = (
-        df_filter[["filter_applied", "mrr_grouped", "top1", "top3", "top5"]]
-        .set_index("filter_applied")
+        df_filter_t[["filter_condition", "mrr_grouped", "top1", "top3", "top5"]]
+        .set_index("filter_condition")
         .rename(columns=lambda c: f"val_{c}")
-        .rename_axis("filter_condition")
     )
     test_headline = (
         df_test_all.groupby("filter_condition")[["mrr_grouped", "top1", "top3", "top5"]]
@@ -2846,11 +3251,11 @@ with tab7:
     for cond in CONDITION_ORDER_T:
         v = (
             float(
-                df_filter.loc[df_filter["filter_applied"] == cond, "mrr_grouped"].iloc[
-                    0
-                ]
+                df_filter_t.loc[
+                    df_filter_t["filter_condition"] == cond, "mrr_grouped"
+                ].iloc[0]
             )
-            if cond in df_filter["filter_applied"].values
+            if cond in df_filter_t["filter_condition"].values
             else 0.0
         )
         t = df_test_all[df_test_all["filter_condition"] == cond]["mrr_grouped"].mean()
@@ -3116,7 +3521,7 @@ with tab7:
     st.markdown(
         "Test set has only a few variants per LOINC code, it is important to interpret per-code numbers as directional "
         "signal only. The scatter confirms that codes that are hard in the val split are also hard in test split "
-        "(no systematic overfitting to val-specific surface forms)."
+        "(no systematic overfitting to val specific surface forms)."
     )
 
     per_loinc_test = (
