@@ -6,3 +6,7 @@ matplotlib
 seaborn
 sentence-transformers
 torch
+plotly
+streamlit
+umap-learn
+pyarrow
