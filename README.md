@@ -312,10 +312,10 @@ over novel surface forms from unseen senders.
 ```
 loinc-crosswalk/
 ├── src/
-│   ├── clinical_utils.py                  # Domain constants, text cleaning, specimen normalization
-│   ├── model_building_utils.py            # Corpus construction, TF-IDF index, retrieval, evaluation
-│   ├── ablation.py                        # Ablation runners: primary, secondary, filter
-│   ├── elr_simulation.py                  # ELR simulation pipeline
+│   ├── clinical_utils.py                 # Domain constants, text cleaning, specimen normalization
+│   ├── model_building_utils.py           # Corpus construction, TF-IDF index, retrieval, evaluation
+│   ├── ablation.py                       # Ablation runners: primary, secondary, filter
+│   ├── elr_simulation.py                 # ELR simulation pipeline
 │   ├── sentence_transformer_ablation.py   # ST model benchmarking
 │   ├── error_analysis.py                  # Error classification and visualization
 │   ├── corpus_and_simulation_viz.py       # UMAP, similarity, simulation visuals
@@ -326,8 +326,7 @@ loinc-crosswalk/
 │   ├── corpus_simulation_viz.ipynb
 │   ├── error_analysis.ipynb
 │   └── test_set_evaluation.ipynb
-├── app/
-│   └── app.py                             # Streamlit portfolio dashboard
+├── streamlit_app.py                          # Streamlit portfolio dashboard
 ├── requirements.txt
 ├── .gitignore
 └── README.md
