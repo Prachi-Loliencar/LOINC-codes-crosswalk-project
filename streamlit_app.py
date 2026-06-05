@@ -3236,7 +3236,7 @@ with tab7:
                 "Val Top-3": "{:.1%}",
                 "Test Top-3": "{:.1%}",
             }
-        ).applymap(
+        ).map(
             lambda v: (
                 "color: #16a34a"
                 if isinstance(v, float) and v > 0.005
@@ -3399,7 +3399,7 @@ with tab7:
                 "Test n": "{:.0f}",
                 "Gap": "{:+.3f}",
             }
-        ).applymap(
+        ).map(
             lambda v: (
                 "color: #16a34a"
                 if isinstance(v, float) and v > 0.02
