@@ -1,6 +1,6 @@
 # LOINC Crosswalk: mapping messy lab test names to standard codes
 
-[![Live demo](https://img.shields.io/badge/Live_demo-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://your-streamlit-app-url.streamlit.app)
+[![Live demo](https://img.shields.io/badge/Live_demo-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://loinc-codes-crosswalk-pl.streamlit.app)
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
