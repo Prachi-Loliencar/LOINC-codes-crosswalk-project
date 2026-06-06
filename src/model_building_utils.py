@@ -868,25 +868,3 @@ def assign_splits(
     _, test_idx = next(sss_test.split(df, df["loinc_num"]))
     df.iloc[test_idx, df.columns.get_loc("split")] = "test"
     return df
-
-
-# def assign_splits(
-#     df: pd.DataFrame,
-#     val_size: float = 0.1,
-#     test_size: float = 0.2,
-#     random_state: int = 42,
-# ) -> pd.DataFrame:
-#     df = df.copy()
-#     df["split"] = "train"
-#     sss_test = StratifiedShuffleSplit(
-#         n_splits=1, test_size=test_size, random_state=random_state
-#     )
-#     train_val_idx, test_idx = next(sss_test.split(df, df["loinc_num"]))
-#     df.iloc[test_idx, df.columns.get_loc("split")] = "test"
-#     df_tv = df.iloc[train_val_idx]
-#     sss_val = StratifiedShuffleSplit(
-#         n_splits=1, test_size=val_size / (1 - test_size), random_state=random_state
-#     )
-#     _, val_idx = next(sss_val.split(df_tv, df_tv["loinc_num"]))
-#     df.iloc[train_val_idx[val_idx], df.columns.get_loc("split")] = "val"
-#     return df

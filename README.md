@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-**[▶ Live demo](https://your-streamlit-app-url.streamlit.app) · [Methodology](#how-it-works) · [Notebooks](notebooks/)**
+**[▶ Live demo](https://loinc-codes-crosswalk-pl.streamlit.app) · [Methodology](#how-it-works) · [Notebooks](notebooks/)**
 
 A clinical NLP retrieval system that maps noisy, free-text lab test names from
 electronic lab reports to standardized **LOINC** codes, framed as an information
@@ -16,15 +16,14 @@ retrieval (entity resolution) problem.
 
 
 <a href="streamlit_screenshot.jpg" target="_blank">
-  <img src="streamlit_screenshot.jpg" alt="App screenshot" width="400" title="Click to enlarge">
-</a>
+  <img src="streamlit_screenshot.jpg" alt="App screenshot" width="800" title="Click to enlarge">
+</a> 
 
----
 
 ## 📌 TL;DR
 
 When a lab reports a result, the test name often arrives as a messy, inconsistent
-string (`SARS COVID-19 PCR Nasophar`). Downstream systems need it mapped to one
+string (eg. `SARS COVID-19 PCR Nasophar`). Downstream systems need it mapped to one
 standard code. I built and benchmarked a retrieval system that does this mapping
 automatically.
 
@@ -154,11 +153,10 @@ three reasons:
    vectorizer plus external distractor sampling.
 2. **Robustness to corpus changes.** Zero distractors means the corpus is fixed
    at deployment, which is easier to reason about in production.
-3. **Distractor effect is unstable.** The complex config improves with distractors
-   while the simple one degrades monotonically, so the distractor benefit may not
+3. **Distractor effect is unstable.** The complex config improves with distractors (this effect depends on the choice of alpha) while the simpler one degrades monotonically, so the distractor benefit may not
    generalize beyond this corpus.
 
-All downstream analyses (filters, error analysis, noise) use the simple config.
+All downstream analyses (filters, error analysis, noise) use the simpler configuration.
 </details>
 
 ---
@@ -176,26 +174,25 @@ CDC LIVD Table ─► Preprocessing ─► Clean seeds (551 rows, 36 LOINC codes
                           ┌───────────────┴───────────────┐
                      TF-IDF retrieval            Sentence transformers
               (98-code corpus, strategy ablation) (6 models × 2 strategies)
-                          │
-                  Post-retrieval filters (oracle / brand imputation)
-                          │
-                  Specimen-aware grouped MRR evaluation
+                          │                                             |
+                  Post-retrieval filters (oracle / brand imputation)    |
+                          │                                             |  
+                  Specimen-aware grouped MRR evaluation ────────────────┘
 ```
 
 In short: real CDC device submissions are turned into realistic noisy lab strings,
 those strings are matched against a 98-code LOINC corpus by cosine similarity,
 optional metadata filters rerank the candidates, and everything is scored with a
-clinically aware MRR. The depth is below.
+clinically aware MRR. The details are provided in depth below.
 
 <details>
 <summary><b>Data sources</b></summary>
 
 **CDC LIVD table.** FDA-authorized SARS-CoV-2 test-kit submissions mapping devices
 to LOINC codes via vendor analyte names, specimen descriptions, and methods. It
-defines the scope: any LOINC code it references is in, covering single-analyte
-COVID codes and combination respiratory panels (flu A/B, RSV, SARS-CoV-2).
+defines the scope for this project - any LOINC code it references is in the corpus, covering single-analyte COVID codes and combination respiratory panels (flu A/B, RSV, SARS-CoV-2).
 
-**LOINC table.** Joined to LIVD on LOINC code, providing component, system, method,
+**LOINC table.** This is inner joined to LIVD on LOINC code, providing component, system, method,
 scale, and long common name for corpus construction.
 
 Raw files are not committed. LIVD:
@@ -204,7 +201,7 @@ Raw files are not committed. LIVD:
 </details>
 
 <details>
-<summary><b>Simulation design (dedup, noise taxonomy, templates)</b></summary>
+<summary><b>Simulation design (deduplication, noise taxonomy, query templates)</b></summary>
 
 **Deduplication.** The raw merged LIVD table holds roughly 998 device rows. Rows
 listing multiple valid specimens (stored newline-separated) are exploded to one
@@ -212,12 +209,12 @@ row per specimen, giving 1,829 rows across 36 codes, because specimen type is a
 simulation axis and collapsing it would suppress naming variation. These are then
 deduplicated on a clinical key (component, method, system, vendor analyte name),
 removing manufacturer redundancy while keeping genuine cross-vendor naming
-differences: 642 rows. A minimum-seeds filter (at least 3 LIVD rows per code)
+differences producing 642 rows. A minimum-seeds filter (at least 3 LIVD rows per code)
 yields **551 clean seeds**, expanded to **6,600 ELR strings** (roughly 12 variants
-per seed), split 5,280 validation and 1,320 test. All reported numbers are on the
+per seed), split into 5,280 validation rows and 1,320 test rows. All reported numbers are on the
 validation split.
 
-**Noise taxonomy.** Three independently tracked dimensions, defined on the input
+**Noise taxonomy.** Three independently tracked dimensions were considered, defined on the input
 string rather than on any model's reaction to it:
 
 - *Corruption*: character-level typos (swap, skip, extra), token identity partly
@@ -225,7 +222,7 @@ string rather than on any model's reaction to it:
   error in structured fields.
 - *Compression*: a signal token replaced by an equivalent surface form
   (`SARS-CoV-2` to `COVID-19`, `RNA` to `PCR`, `nucleocapsid` to `N-GENE`).
-  Information present but re-encoded, recoverable by a domain-aware model.
+  Information is present but re-encoded, recoverable by a domain-aware model.
 - *Omission*: signal deleted entirely (empty replacement, or a whole component
   structurally absent). Unrecoverable without external metadata or a
   retrieval-side expansion dictionary.
@@ -248,8 +245,8 @@ A (analyte), M (method), S (specimen), I (interpretation). Most common: `A+M`
 <details>
 <summary><b>Corpus strategies (the ablation)</b></summary>
 
-The corpus is always the same 98-code surveillance panel; only the text
-representation of each code varies.
+The corpus is always the same 98 LOINC code surveillance panel; only the text
+representation of each code varies, created by combining different columns of the LOINC table.
 
 - **`lcn_only`** (baseline): long common name only.
 - **`combined`**: long common name (repeated twice) + system expansion +
@@ -287,20 +284,18 @@ could buy.
 tokens (`COBAS`, `VERITOR`, `XPERT`) and imputes method class via a curated lookup
 (`COBAS` to `probe.amp.tar`), applying the same demotion. Feasible because it needs
 only the string itself. Its effect is near zero (0.747 to 0.748), and it is
-byte-identical to no-filter across almost every coverage pattern, confirming the
-corpus is already method-skewed.
+byte-identical to no filter across almost every coverage pattern, confirming the
+corpus is already method skewed.
 
 **Primary metric: specimen-aware grouped MRR.** For each string, the valid answer
 set is expanded beyond the single true code to include codes sharing component and
-method with a specimen-compatible system, plus gene-target-ambiguous codes that
+method with a specimen compatible system, plus gene target ambiguous codes that
 vendor analyte names cannot distinguish. This handles LOINC's use of generic
-respiratory specimen codes for COVID reporting: 45.5% of wrong top-1 predictions
-are specimen-specificity mismatches (for example Nose vs Respiratory System)
+respiratory specimen codes for COVID reporting: 45.5% of wrong top 1 predictions
+are specimen specificity mismatches (for example Nose vs Respiratory System)
 absorbed by the grouped metric rather than true retrieval failures.
 
-**Splits.** Assigned by variant number, not randomly within code, reflecting the
-deployment scenario where all codes are known at inference and generalization is
-over novel surface forms from unseen senders.
+**Splits.** The simulated data is randomly split into validation (80%) and test (20%) sets, stratified by LOINC codes to ensure the same distribution of codes occurs in both splits.
 </details>
 
 ---
@@ -393,7 +388,6 @@ The remaining analysis notebooks (`ablation_results_combined`, `corpus_simulatio
   in progress; CITI certification complete).
 - Extend to non-COVID respiratory LOINC codes.
 - Fine-tune a domain sentence transformer on clinical text.
-- Add a BigQuery and dbt analytics layer as a companion project.
 
 ---
 
