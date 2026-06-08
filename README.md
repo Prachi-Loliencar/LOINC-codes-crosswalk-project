@@ -393,6 +393,8 @@ The remaining analysis notebooks (`ablation_results_combined`, `corpus_simulatio
 
 ## 📄 Acknowledgements & data licensing
 
+This project is licensed under the MIT License (see `LICENSE` file).
+
 This material contains content from LOINC (http://loinc.org). LOINC is copyright
 © Regenstrief Institute, Inc. and the Logical Observation Identifiers Names and
 Codes (LOINC) Committee and is available at no cost under the license at
@@ -408,3 +410,10 @@ LOINC version used: <2.81>.
 
 The CDC LIVD device submission table is a public-domain CDC resource. This project
 is not affiliated with or endorsed by the Regenstrief Institute or the CDC.
+
+---
+
+## Contact
+
+Questions or collaboration ideas? [Message me on LinkedIn](https://linkedin.com/in/prachiloliencar)
+ 

@@ -2,9 +2,9 @@ name: Validate and Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
 
 jobs:
   validate:
@@ -32,7 +32,7 @@ jobs:
   notify-deploy:
     needs: validate
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/master'
     steps:
       - name: Confirm deployment triggered
         run: echo "Validation passed. Streamlit Community Cloud will auto-redeploy."
