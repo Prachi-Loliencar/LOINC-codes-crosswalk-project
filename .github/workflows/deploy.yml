@@ -1,0 +1,38 @@
+name: Validate and Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Validate summary tables exist and have expected columns
+        run: python scripts/validate_summaries.py
+
+      - name: Run unit tests
+        run: pytest tests/ -v
+
+  # Streamlit Community Cloud deploys automatically on push to main
+  # This job documents that dependency explicitly
+  notify-deploy:
+    needs: validate
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Confirm deployment triggered
+        run: echo "Validation passed. Streamlit Community Cloud will auto-redeploy."
