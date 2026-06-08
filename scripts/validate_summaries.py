@@ -128,6 +128,7 @@ for filename, required_cols in EXPECTED.items():
     if len(df) == 0:
         errors.append(f"{filename}: empty dataframe")
 
+
 if errors:
     print("Validation failed:")
     for e in errors:
@@ -135,3 +136,4 @@ if errors:
     sys.exit(1)
 
 print(f"All {len(EXPECTED)} summary files validated.")
+sys.exit(0)  # explicit clean exit
