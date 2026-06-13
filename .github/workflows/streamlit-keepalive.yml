@@ -11,5 +11,5 @@ jobs:
     steps:
       - name: Ping Streamlit app
         run: |
-          curl -s https://your-streamlit-app-url.streamlit.app/ > /dev/null
+          curl -s https://loinc-codes-crosswalk-pl.streamlit.app/ > /dev/null
           echo "Pinged at $(date)"
